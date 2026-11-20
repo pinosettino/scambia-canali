@@ -22,6 +22,9 @@ fun tint(col: Int, g: Float): Int {
     return Color.rgb(m(Color.red(col)), m(Color.green(col)), m(Color.blue(col)))
 }
 
+/** Fattore di scala del pannello: 1.0 = grandezza originale, 0.5 = metà. */
+const val PALETTE_SCALE = 0.5f
+
 class PaletteView(context: Context) : View(context) {
     var perm = 0
     val gain = intArrayOf(128, 128, 128)
@@ -31,14 +34,14 @@ class PaletteView(context: Context) : View(context) {
     var onGain: (() -> Unit)? = null
 
     private val d = resources.displayMetrics.density
-    private fun dp(v: Int): Float = v * d
+    private fun dp(v: Int): Float = v * d * PALETTE_SCALE
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = Color.BLACK }
     private val letter = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.BLACK; textAlign = Paint.Align.CENTER; isFakeBoldText = true; textSize = 26 * d
+        color = Color.BLACK; textAlign = Paint.Align.CENTER; isFakeBoldText = true; textSize = 26 * d * PALETTE_SCALE
     }
     private val pct = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE; textAlign = Paint.Align.CENTER; isFakeBoldText = true; textSize = 16 * d
+        color = Color.WHITE; textAlign = Paint.Align.CENTER; isFakeBoldText = true; textSize = 12 * d
     }
     private var drag = -1
 
@@ -93,7 +96,7 @@ class PaletteView(context: Context) : View(context) {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 drag = -1
-                for (c in 0..2) if (e.x >= gx(c) - dp(3) && e.x <= gx(c) + dp(29)) drag = c
+                for (c in 0..2) if (e.x >= gx(c) - 4 * d && e.x <= gx(c) + dp(26) + 4 * d) drag = c
                 if (drag >= 0) {
                     parent?.requestDisallowInterceptTouchEvent(true)
                     setGain(drag, e.y)

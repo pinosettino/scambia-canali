@@ -107,8 +107,9 @@ class MainActivity : AppCompatActivity() {
     private fun tv(t: String, f: () -> Unit): TextView = TextView(this).apply {
         text = t
         setTextColor(Color.WHITE)
-        textSize = 16f
-        setPadding(dp(8), dp(10), dp(8), dp(10))
+        textSize = 15f
+        isSingleLine = true
+        setPadding(dp(6), dp(10), dp(6), dp(10))
         setOnClickListener { f() }
     }
 
