@@ -146,15 +146,12 @@ class MainActivity : AppCompatActivity() {
         bar.addView(tv("apri") { openClicked() })
         bar.addView(tv("salva") { save() })
         bar.addView(tv("azzera") { resetAll() })
-        palBtn = tv("palette RGB") {
-            val open = pal.visibility != View.VISIBLE
-            pal.visibility = if (open) View.VISIBLE else View.GONE
-            palBtn.setTextColor(if (open) 0xFF00E000.toInt() else Color.WHITE)
-        }
+        palBtn = tv("palette RGB") { setPalette(pal.visibility != View.VISIBLE) }
         bar.addView(palBtn)
 
         val stage = FrameLayout(this)
         img = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        img.setOnClickListener { setPalette(false); settings.visibility = View.GONE }
         stage.addView(img, FrameLayout.LayoutParams(-1, -1))
         hint = TextView(this).apply {
             text = "Tocca \u00abapri\u00bb per scegliere un'immagine."
@@ -203,6 +200,11 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
         applyModel()
         refreshNames()
+    }
+
+    private fun setPalette(open: Boolean) {
+        pal.visibility = if (open) View.VISIBLE else View.GONE
+        palBtn.setTextColor(if (open) 0xFF00E000.toInt() else Color.WHITE)
     }
 
     // ---------- impostazioni ----------
@@ -343,16 +345,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Scegliendo un nuovo scambio, l'immagine attuale diventa la nuova base: gli scambi si sommano. */
+    /** Ogni scambio parte sempre dall'immagine originale; toccando un pallino i cursori tornano a 100. */
     private fun pickPerm(i: Int) {
-        if (i == pal.perm) return
-        val base = prevBase
-        if (base != null) {
-            if (!(pal.perm == 0 && pal.gain.all { it == 100 })) history.add(Step(pal.perm, pal.gain.copyOf(), model == "CMY"))
-            val nb = base.copyOf()
-            applyStep(nb, pal.perm, pal.gain.copyOf(), model == "CMY")
-            prevBase = nb
-        }
         pal.perm = i
         pal.gain.fill(100)
         pal.invalidate()
