@@ -29,7 +29,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 
-class Step(val perm: Int, val gain: IntArray)
+class Step(val perm: Int, val gain: IntArray, val cmy: Boolean)
 
 class OpenImage : ActivityResultContracts.OpenDocument() {
     var initial: Uri? = null
@@ -43,13 +43,15 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
 private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
 
 /**
- * Scambia i canali e poi agisce solo sul colore: gain 0 = grigio, 128 = invariato, 256 = doppio.
- * Il cursore c agisce sul canale di uscita PERMS[perm][c]; la luminosità resta costante.
+ * Scambia i canali e poi attenua i colori: 100 = valore originale, 0 = massima attenuazione.
+ * RGB: si toglie luce al canale (valore * k). CMY: si toglie inchiostro (inchiostro * k).
+ * Il cursore c agisce sul canale indicato dalla sua lettera. La luminosità resta quella
+ * dell'immagine prima dell'attenuazione: con tutti i canali a 0 si ottiene il bianco e nero.
  */
-fun applyStep(px: IntArray, perm: Int, gain: IntArray) {
+fun applyStep(px: IntArray, perm: Int, gain: IntArray, cmy: Boolean) {
     val p = PERMS[perm]
     val g = FloatArray(3)
-    for (c in 0..2) g[p[c]] = gain[c] / 128f
+    for (c in 0..2) g[p[c]] = gain[c] / 100f
     val v = FloatArray(3)
     for (i in px.indices) {
         val c0 = px[i]
@@ -60,9 +62,18 @@ fun applyStep(px: IntArray, perm: Int, gain: IntArray) {
         val o1 = v[p[1]]
         val o2 = v[p[2]]
         val y = 0.299f * o0 + 0.587f * o1 + 0.114f * o2
-        val t0 = y + g[0] * (o0 - y)
-        val t1 = y + g[1] * (o1 - y)
-        val t2 = y + g[2] * (o2 - y)
+        val t0: Float
+        val t1: Float
+        val t2: Float
+        if (cmy) {
+            t0 = 255f - (255f - o0) * g[0]
+            t1 = 255f - (255f - o1) * g[1]
+            t2 = 255f - (255f - o2) * g[2]
+        } else {
+            t0 = o0 * g[0]
+            t1 = o1 * g[1]
+            t2 = o2 * g[2]
+        }
         val d = y - (0.299f * t0 + 0.587f * t1 + 0.114f * t2)
         px[i] = (c0 and (0xFF shl 24)) or (cl(t0 + d) shl 16) or (cl(t1 + d) shl 8) or cl(t2 + d)
     }
@@ -198,7 +209,7 @@ class MainActivity : AppCompatActivity() {
     private fun setModel(m: String) {
         model = m
         prefs.edit().putString("model", m).apply()
-        pal.gain.fill(128)
+        pal.gain.fill(100)
         applyModel()
         requestRender()
     }
@@ -300,7 +311,7 @@ class MainActivity : AppCompatActivity() {
                     pw = b.width; ph = b.height
                     prevOrig = px; prevBase = px.copyOf()
                     history.clear()
-                    pal.perm = 0; pal.gain.fill(128); pal.invalidate()
+                    pal.perm = 0; pal.gain.fill(100); pal.invalidate()
                     hint.visibility = View.GONE
                     requestRender()
                 }
@@ -319,7 +330,7 @@ class MainActivity : AppCompatActivity() {
                     val base = prevBase ?: break
                     try {
                         val out = base.copyOf()
-                        applyStep(out, pal.perm, pal.gain.copyOf())
+                        applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -337,13 +348,13 @@ class MainActivity : AppCompatActivity() {
         if (i == pal.perm) return
         val base = prevBase
         if (base != null) {
-            if (!(pal.perm == 0 && pal.gain.all { it == 128 })) history.add(Step(pal.perm, pal.gain.copyOf()))
+            if (!(pal.perm == 0 && pal.gain.all { it == 100 })) history.add(Step(pal.perm, pal.gain.copyOf(), model == "CMY"))
             val nb = base.copyOf()
-            applyStep(nb, pal.perm, pal.gain.copyOf())
+            applyStep(nb, pal.perm, pal.gain.copyOf(), model == "CMY")
             prevBase = nb
         }
         pal.perm = i
-        pal.gain.fill(128)
+        pal.gain.fill(100)
         pal.invalidate()
         requestRender()
     }
@@ -353,7 +364,7 @@ class MainActivity : AppCompatActivity() {
         history.clear()
         prevBase = o.copyOf()
         pal.perm = 0
-        pal.gain.fill(128)
+        pal.gain.fill(100)
         pal.invalidate()
         requestRender()
     }
@@ -369,6 +380,7 @@ class MainActivity : AppCompatActivity() {
         }
         val sp = pal.perm
         val sg = pal.gain.copyOf()
+        val cm = model == "CMY"
         val steps = ArrayList(history)
         val letters = if (model == "RGB") "RGB" else "CMY"
         val nm = imgName
@@ -382,8 +394,8 @@ class MainActivity : AppCompatActivity() {
                 val h = bmp.height
                 val px = IntArray(w * h)
                 bmp.getPixels(px, 0, w, 0, 0, w, h)
-                for (s in steps) applyStep(px, s.perm, s.gain)
-                applyStep(px, sp, sg)
+                for (s in steps) applyStep(px, s.perm, s.gain, s.cmy)
+                applyStep(px, sp, sg, cm)
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
                 val fmt: Bitmap.CompressFormat
