@@ -28,6 +28,10 @@ import androidx.documentfile.provider.DocumentFile
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
+import kotlin.math.sqrt
+import kotlin.math.min
+import kotlin.math.floor
+import kotlin.math.ceil
 import android.widget.SeekBar
 import androidx.appcompat.widget.SwitchCompat
 
@@ -43,6 +47,72 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
 }
 
 private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
+
+/**
+ * Retino a pallini sul bianco e nero puro: griglia di celle quadrate (cols colonne), un pallino al centro
+ * di ogni cella. Il raggio dipende da quanto nero c'è nella cella: cella tutta nera = pallino che
+ * riempie la cella e si fonde con i vicini, cella tutta bianca = nessun pallino.
+ * I pallini hanno il colore del nero, lo sfondo il colore del bianco.
+ */
+fun applyDots(px: IntArray, w: Int, h: Int, t: Int, cols: Int, black: Int, white: Int) {
+    val cs = w.toFloat() / cols
+    val rows = ceil((h / cs).toDouble()).toInt()
+    val nb = IntArray(cols * rows)
+    val nt = IntArray(cols * rows)
+    val xc = IntArray(w) { min(cols - 1, (it / cs).toInt()) }
+    for (y in 0 until h) {
+        val yc = min(rows - 1, (y / cs).toInt()) * cols
+        val base = y * w
+        for (x in 0 until w) {
+            val c0 = px[base + x]
+            val lum = (299 * ((c0 shr 16) and 255) + 587 * ((c0 shr 8) and 255) + 114 * (c0 and 255)) / 1000
+            val k = yc + xc[x]
+            nt[k]++
+            if (lum < t) nb[k]++
+        }
+    }
+    java.util.Arrays.fill(px, (0xFF shl 24) or (white and 0xFFFFFF))
+    val bk = (0xFF shl 24) or (black and 0xFFFFFF)
+    val br = (black shr 16) and 255
+    val bg = (black shr 8) and 255
+    val bb = black and 255
+    for (j in 0 until rows) {
+        for (i in 0 until cols) {
+            val k = j * cols + i
+            if (nb[k] == 0) continue
+            val cov = nb[k].toFloat() / nt[k]
+            if (cov < 0.02f) continue
+            val r = 0.7071f * cs * sqrt(cov)
+            val cx = (i + 0.5f) * cs
+            val cy = (j + 0.5f) * cs
+            val x0 = max(0, floor(cx - r - 1f).toInt())
+            val x1 = min(w - 1, ceil(cx + r + 1f).toInt())
+            val y0 = max(0, floor(cy - r - 1f).toInt())
+            val y1 = min(h - 1, ceil(cy + r + 1f).toInt())
+            for (y in y0..y1) {
+                val dy = y + 0.5f - cy
+                for (x in x0..x1) {
+                    val dx = x + 0.5f - cx
+                    val a = (r - sqrt(dx * dx + dy * dy) + 0.5f).coerceIn(0f, 1f)
+                    if (a <= 0f) continue
+                    val idx = y * w + x
+                    if (a >= 1f) {
+                        px[idx] = bk
+                    } else {
+                        val cur = px[idx]
+                        val rr = (cur shr 16) and 255
+                        val gg = (cur shr 8) and 255
+                        val b2 = cur and 255
+                        val nr = (rr + (br - rr) * a + 0.5f).toInt()
+                        val ng = (gg + (bg - gg) * a + 0.5f).toInt()
+                        val nbl = (b2 + (bb - b2) * a + 0.5f).toInt()
+                        px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nbl
+                    }
+                }
+            }
+        }
+    }
+}
 
 /** Colore ARGB da tre quantità di inchiostro C, M, Y (0..100): 0,0,0 = bianco, 100,100,100 = nero. */
 fun inkToColor(ink: IntArray): Int {
@@ -207,6 +277,9 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var che = false
     @Volatile private var cheBlack = 50
     private lateinit var cheSwitch: SwitchCompat
+    private lateinit var dotsSwitch: SwitchCompat
+    @Volatile private var dotsOn = false
+    @Volatile private var dotCols = 60
     private val inkW = intArrayOf(0, 0, 0)
     private val inkB = intArrayOf(100, 100, 100)
     @Volatile private var colW = 0xFFFFFFFF.toInt()
@@ -245,6 +318,7 @@ class MainActivity : AppCompatActivity() {
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         model = prefs.getString("model", "RGB") ?: "RGB"
         cheBlack = prefs.getInt("cheBlack", 50)
+        dotCols = prefs.getInt("dotCols", 60)
         for ((key, arr) in listOf("inkW" to inkW, "inkB" to inkB)) {
             val v = prefs.getString(key, null)?.split(",")?.map { it.toIntOrNull() ?: 0 }
             if (v != null && v.size == 3) for (i in 0..2) arr[i] = v[i].coerceIn(0, 100)
@@ -396,6 +470,38 @@ class MainActivity : AppCompatActivity() {
             cheBox.addView(row)
         }
         showInks()
+
+        // retino a pallini: numero di colonne della griglia (10..200)
+        val dotsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        val dotsLabel = TextView(this).apply { setTextColor(Color.WHITE); text = "Colonne: $dotCols" }
+        val dotsSeek = SeekBar(this).apply {
+            max = 190
+            progress = dotCols - 10
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    dotCols = p + 10
+                    dotsLabel.text = "Colonne: $dotCols"
+                    if (fromUser) requestRender()
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    prefs.edit().putInt("dotCols", dotCols).apply()
+                }
+            })
+        }
+        dotsBox.addView(dotsLabel)
+        dotsBox.addView(dotsSeek)
+        dotsSwitch = SwitchCompat(this).apply {
+            text = "Retino a pallini"
+            setTextColor(Color.WHITE)
+            setOnCheckedChangeListener { _, on ->
+                dotsOn = on
+                dotsBox.visibility = if (on) View.VISIBLE else View.GONE
+                requestRender()
+            }
+        }
+        cheBox.addView(dotsSwitch)
+        cheBox.addView(dotsBox)
         cheSwitch = SwitchCompat(this).apply {
             text = "Effetto Che Guevara"
             setTextColor(Color.WHITE)
@@ -544,6 +650,7 @@ class MainActivity : AppCompatActivity() {
                     pal.perm = 0; pal.resetValues(); pal.invalidate()
                     hint.visibility = View.GONE
                     cheSwitch.isChecked = false
+                    dotsSwitch.isChecked = false
                     requestRender()
                 }
             } catch (e: Throwable) {
@@ -562,7 +669,11 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val out = base.copyOf()
                         applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
-                        if (che) applyThreshold(out, thresholdFor(out, cheBlack), colB, colW)
+                        if (che) {
+                            val tt = thresholdFor(out, cheBlack)
+                            if (dotsOn) applyDots(out, pw, ph, tt, dotCols, colB, colW)
+                            else applyThreshold(out, tt, colB, colW)
+                        }
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -625,6 +736,8 @@ class MainActivity : AppCompatActivity() {
         val chPct = cheBlack
         val cB = colB
         val cW = colW
+        val dOn = dotsOn
+        val dCols = dotCols
         val pb = prevBase
         val steps = ArrayList(history)
         val letters = if (model == "RGB") "RGB" else "CMY"
@@ -646,7 +759,8 @@ class MainActivity : AppCompatActivity() {
                     // la soglia si calcola sull'anteprima, così il file salvato è identico a ciò che vedi
                     val tmp = pb!!.copyOf()
                     applyStep(tmp, sp, sg, cm)
-                    applyThreshold(px, thresholdFor(tmp, chPct), cB, cW)
+                    val tt = thresholdFor(tmp, chPct)
+                    if (dOn) applyDots(px, w, h, tt, dCols, cB, cW) else applyThreshold(px, tt, cB, cW)
                 }
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
@@ -665,7 +779,7 @@ class MainActivity : AppCompatActivity() {
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
                 val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
                 val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + hist + "_" + label(sp) + ext
+                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (chOn && dOn) "_retino" else "") + hist + "_" + label(sp) + ext
 
                 val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
                 dir.findFile(fn)?.delete()
