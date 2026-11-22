@@ -49,15 +49,30 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
 private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
 
 /**
- * Retino a pallini sul bianco e nero puro: griglia di celle quadrate (cols colonne), un pallino al centro
- * di ogni cella. Il raggio dipende da quanto nero c'è nella cella: cella tutta nera = pallino che
- * riempie la cella e si fonde con i vicini, cella tutta bianca = nessun pallino.
- * I pallini hanno il colore del nero, lo sfondo il colore del bianco.
+ * Retino a pallini, filtro indipendente: lavora sulla luminosità dell'immagine che arriva dai filtri
+ * precedenti. Griglia di celle quadrate (cols colonne), un pallino al centro di ogni cella: più la
+ * cella è scura, più il pallino è grande (cella nera = pallino che riempie la cella e si fonde con
+ * i vicini, cella bianca = nessun pallino). Pallini nel colore del nero, sfondo nel colore del bianco.
  */
-fun applyDots(px: IntArray, w: Int, h: Int, t: Int, cols: Int, black: Int, white: Int) {
+/** Raggio (in celle) del pallino che, nella griglia, copre la frazione "dark" della cella; i pallini si fondono oltre 0,5. */
+private fun dotRadius(dark: Double): Float {
+    fun cov(r: Double): Double =
+        if (r <= 0.5) Math.PI * r * r
+        else Math.PI * r * r - 4 * (r * r * Math.acos(0.5 / r) - 0.5 * Math.sqrt(r * r - 0.25))
+    if (dark <= Math.PI / 4) return Math.sqrt(dark / Math.PI).toFloat()
+    var lo = 0.5
+    var hi = 0.7072
+    repeat(40) {
+        val m = (lo + hi) / 2
+        if (cov(m) < dark) lo = m else hi = m
+    }
+    return hi.toFloat()
+}
+
+fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
     val cs = w.toFloat() / cols
     val rows = ceil((h / cs).toDouble()).toInt()
-    val nb = IntArray(cols * rows)
+    val sum = LongArray(cols * rows)
     val nt = IntArray(cols * rows)
     val xc = IntArray(w) { min(cols - 1, (it / cs).toInt()) }
     for (y in 0 until h) {
@@ -68,7 +83,7 @@ fun applyDots(px: IntArray, w: Int, h: Int, t: Int, cols: Int, black: Int, white
             val lum = (299 * ((c0 shr 16) and 255) + 587 * ((c0 shr 8) and 255) + 114 * (c0 and 255)) / 1000
             val k = yc + xc[x]
             nt[k]++
-            if (lum < t) nb[k]++
+            sum[k] += lum.toLong()
         }
     }
     java.util.Arrays.fill(px, (0xFF shl 24) or (white and 0xFFFFFF))
@@ -76,13 +91,14 @@ fun applyDots(px: IntArray, w: Int, h: Int, t: Int, cols: Int, black: Int, white
     val br = (black shr 16) and 255
     val bg = (black shr 8) and 255
     val bb = black and 255
+    val rt = FloatArray(256) { dotRadius(it / 255.0) }
     for (j in 0 until rows) {
         for (i in 0 until cols) {
             val k = j * cols + i
-            if (nb[k] == 0) continue
-            val cov = nb[k].toFloat() / nt[k]
-            if (cov < 0.02f) continue
-            val r = 0.7071f * cs * sqrt(cov)
+            if (nt[k] == 0) continue
+            val dark = 1f - sum[k].toFloat() / (nt[k] * 255f)
+            if (dark < 0.02f) continue
+            val r = rt[(dark * 255f + 0.5f).toInt().coerceIn(0, 255)] * cs
             val cx = (i + 0.5f) * cs
             val cy = (j + 0.5f) * cs
             val x0 = max(0, floor(cx - r - 1f).toInt())
@@ -406,6 +422,7 @@ class MainActivity : AppCompatActivity() {
         cheBox.addView(cheSeek)
 
         // colori del bianco e del nero: si sceglie il cerchio, poi si regolano C, M, Y (0..100)
+        val colorBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         var sel = 0
         val dotW = View(this)
         val dotB = View(this)
@@ -441,7 +458,7 @@ class MainActivity : AppCompatActivity() {
         dots.addView(lab("Nero"))
         dotW.setOnClickListener { sel = 0; showInks() }
         dotB.setOnClickListener { sel = 1; showInks() }
-        cheBox.addView(dots)
+        colorBox.addView(dots)
         for (c in 0..2) {
             val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             val l = TextView(this).apply { setTextColor(Color.WHITE); minWidth = dp(54) }
@@ -467,7 +484,7 @@ class MainActivity : AppCompatActivity() {
             inkBars.add(b)
             row.addView(l)
             row.addView(b, LinearLayout.LayoutParams(0, -2, 1f))
-            cheBox.addView(row)
+            colorBox.addView(row)
         }
         showInks()
 
@@ -497,22 +514,25 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, on ->
                 dotsOn = on
                 dotsBox.visibility = if (on) View.VISIBLE else View.GONE
+                colorBox.visibility = if (che || dotsOn) View.VISIBLE else View.GONE
                 requestRender()
             }
         }
-        cheBox.addView(dotsSwitch)
-        cheBox.addView(dotsBox)
         cheSwitch = SwitchCompat(this).apply {
             text = "Effetto Che Guevara"
             setTextColor(Color.WHITE)
             setOnCheckedChangeListener { _, on ->
                 che = on
                 cheBox.visibility = if (on) View.VISIBLE else View.GONE
+                colorBox.visibility = if (che || dotsOn) View.VISIBLE else View.GONE
                 requestRender()
             }
         }
         settings.addView(cheSwitch)
         settings.addView(cheBox)
+        settings.addView(dotsSwitch)
+        settings.addView(dotsBox)
+        settings.addView(colorBox)
         settings.addView(Button(this).apply {
             text = "Cartella per apri"
             setOnClickListener { pickOpenDir.launch(prefs.getString("openDir", null)?.let { Uri.parse(it) }) }
@@ -669,11 +689,8 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val out = base.copyOf()
                         applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
-                        if (che) {
-                            val tt = thresholdFor(out, cheBlack)
-                            if (dotsOn) applyDots(out, pw, ph, tt, dotCols, colB, colW)
-                            else applyThreshold(out, tt, colB, colW)
-                        }
+                        if (che) applyThreshold(out, thresholdFor(out, cheBlack), colB, colW)
+                        if (dotsOn) applyDots(out, pw, ph, dotCols, colB, colW)
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -760,13 +777,14 @@ class MainActivity : AppCompatActivity() {
                     val tmp = pb!!.copyOf()
                     applyStep(tmp, sp, sg, cm)
                     val tt = thresholdFor(tmp, chPct)
-                    if (dOn) applyDots(px, w, h, tt, dCols, cB, cW) else applyThreshold(px, tt, cB, cW)
+                    applyThreshold(px, tt, cB, cW)
                 }
+                if (dOn) applyDots(px, w, h, dCols, cB, cW)
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
                 val fmt: Bitmap.CompressFormat
                 val outMime: String
-                when (if (chOn) "image/png" else mt) {
+                when (if (chOn || dOn) "image/png" else mt) {
                     "image/jpeg" -> { fmt = Bitmap.CompressFormat.JPEG; outMime = mt }
                     "image/webp" -> {
                         fmt = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
@@ -779,7 +797,7 @@ class MainActivity : AppCompatActivity() {
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
                 val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
                 val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (chOn && dOn) "_retino" else "") + hist + "_" + label(sp) + ext
+                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (dOn) "_retino" else "") + hist + "_" + label(sp) + ext
 
                 val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
                 dir.findFile(fn)?.delete()
