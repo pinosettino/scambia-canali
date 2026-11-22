@@ -43,6 +43,53 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
 private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
 
 /**
+ * Livelli per trasformare un negativo in positivo: per ogni canale, il punto più scuro e il più chiaro
+ * dell'immagine già invertita (si scartano lo 0,5% di pixel estremi, per polvere e bordi).
+ * Restituisce [min R, min G, min B, max R, max G, max B].
+ */
+fun computeLevels(px: IntArray): FloatArray {
+    val h = Array(3) { IntArray(256) }
+    for (c0 in px) {
+        h[0][255 - ((c0 shr 16) and 255)]++
+        h[1][255 - ((c0 shr 8) and 255)]++
+        h[2][255 - (c0 and 255)]++
+    }
+    val n = px.size
+    val lo = (n * 0.005).toInt()
+    val hi = (n * 0.995).toInt()
+    val r = FloatArray(6)
+    for (c in 0..2) {
+        var acc = 0
+        var l = 0
+        var hh = 255
+        var gotLo = false
+        for (v in 0..255) {
+            acc += h[c][v]
+            if (!gotLo && acc > lo) { l = v; gotLo = true }
+            if (acc >= hi) { hh = v; break }
+        }
+        r[c] = l.toFloat()
+        r[3 + c] = hh.toFloat()
+    }
+    return r
+}
+
+/** Inverte i valori e stira ogni canale tra il suo minimo e massimo: toglie anche la dominante arancione. */
+fun applyPositive(px: IntArray, lv: FloatArray) {
+    val s0 = 255f / max(lv[3] - lv[0], 1f)
+    val s1 = 255f / max(lv[4] - lv[1], 1f)
+    val s2 = 255f / max(lv[5] - lv[2], 1f)
+    for (i in px.indices) {
+        val c0 = px[i]
+        val r = 255 - ((c0 shr 16) and 255)
+        val g = 255 - ((c0 shr 8) and 255)
+        val b = 255 - (c0 and 255)
+        px[i] = (c0 and (0xFF shl 24)) or
+            (cl((r - lv[0]) * s0) shl 16) or (cl((g - lv[1]) * s1) shl 8) or cl((b - lv[2]) * s2)
+    }
+}
+
+/**
  * Scambia i canali e poi regola i colori: 50 = valore originale, 0 = canale spento, 100 = doppio.
  * RGB: si moltiplica la luce del canale. CMY: si moltiplica l'inchiostro.
  * Il cursore c agisce sul canale indicato dalla sua lettera. La luminosità resta quella
@@ -115,6 +162,7 @@ class MainActivity : AppCompatActivity() {
     private var ph = 0
     private var prevOrig: IntArray? = null
     private var prevBase: IntArray? = null
+    private var lv: FloatArray? = null
     private val history = ArrayList<Step>()
 
     private val exec = Executors.newSingleThreadExecutor()
@@ -199,6 +247,15 @@ class MainActivity : AppCompatActivity() {
         (if (model == "RGB") rbRgb else rbCmy).isChecked = true
         rg.setOnCheckedChangeListener { _, id -> setModel(if (id == rbRgb.id) "RGB" else "CMY") }
         settings.addView(rg)
+        settings.addView(androidx.appcompat.widget.SwitchCompat(this).apply {
+            text = "Negativo \u2192 positivo"
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean("negative", false)
+            setOnCheckedChangeListener { _, on ->
+                prefs.edit().putBoolean("negative", on).apply()
+                rebuildBase()
+            }
+        })
         settings.addView(Button(this).apply {
             text = "Cartella per apri"
             setOnClickListener { pickOpenDir.launch(prefs.getString("openDir", null)?.let { Uri.parse(it) }) }
@@ -329,7 +386,7 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     origUri = uri; imgName = nm; mime = mt
                     pw = b.width; ph = b.height
-                    prevOrig = px; prevBase = px.copyOf()
+                    prevOrig = px; lv = computeLevels(px); prevBase = basePixels(px)
                     history.clear()
                     pal.perm = 0; pal.resetValues(); pal.invalidate()
                     hint.visibility = View.GONE
@@ -371,10 +428,24 @@ class MainActivity : AppCompatActivity() {
         requestRender()
     }
 
+    /** Immagine di partenza per l'anteprima: l'originale, o il suo positivo se l'interruttore è acceso. */
+    private fun basePixels(o: IntArray): IntArray {
+        val b = o.copyOf()
+        val l = lv
+        if (prefs.getBoolean("negative", false) && l != null) applyPositive(b, l)
+        return b
+    }
+
+    private fun rebuildBase() {
+        val o = prevOrig ?: return
+        prevBase = basePixels(o)
+        requestRender()
+    }
+
     private fun resetAll() {
         val o = prevOrig ?: return
         history.clear()
-        prevBase = o.copyOf()
+        prevBase = basePixels(o)
         pal.perm = 0
         pal.resetValues()
         pal.invalidate()
@@ -393,6 +464,8 @@ class MainActivity : AppCompatActivity() {
         val sp = pal.perm
         val sg = pal.gain.copyOf()
         val cm = model == "CMY"
+        val neg = prefs.getBoolean("negative", false)
+        val lvs = lv
         val steps = ArrayList(history)
         val letters = if (model == "RGB") "RGB" else "CMY"
         val nm = imgName
@@ -406,6 +479,7 @@ class MainActivity : AppCompatActivity() {
                 val h = bmp.height
                 val px = IntArray(w * h)
                 bmp.getPixels(px, 0, w, 0, 0, w, h)
+                if (neg && lvs != null) applyPositive(px, lvs)
                 for (s in steps) applyStep(px, s.perm, s.gain, s.cmy)
                 applyStep(px, sp, sg, cm)
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
@@ -425,7 +499,7 @@ class MainActivity : AppCompatActivity() {
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
                 val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
                 val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + hist + "_" + label(sp) + ext
+                val fn = base + (if (neg) "_pos" else "") + hist + "_" + label(sp) + ext
 
                 val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
                 dir.findFile(fn)?.delete()
