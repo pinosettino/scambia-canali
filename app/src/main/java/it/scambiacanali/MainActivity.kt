@@ -44,6 +44,12 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
 
 private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
 
+/** Colore ARGB da tre quantità di inchiostro C, M, Y (0..100): 0,0,0 = bianco, 100,100,100 = nero. */
+fun inkToColor(ink: IntArray): Int {
+    fun ch(v: Int) = (255f * (100 - v) / 100f + 0.5f).toInt()
+    return (0xFF shl 24) or (ch(ink[0]) shl 16) or (ch(ink[1]) shl 8) or ch(ink[2])
+}
+
 /**
  * Soglia per l'effetto a due colori: i pixel con luminosità sotto la soglia diventano neri.
  * Si sceglie la soglia in modo che la quota di pixel neri sia pctNero (0..100).
@@ -65,15 +71,15 @@ fun thresholdFor(px: IntArray, pctNero: Int): Int {
     return 256
 }
 
-/** Solo nero e bianco puri, senza grigi. */
-fun applyThreshold(px: IntArray, t: Int) {
+/** Solo due colori, senza grigi: scuri -> colore del nero, chiari -> colore del bianco. */
+fun applyThreshold(px: IntArray, t: Int, black: Int, white: Int) {
     for (i in px.indices) {
         val c0 = px[i]
         val r = (c0 shr 16) and 255
         val g = (c0 shr 8) and 255
         val b = c0 and 255
         val lum = (299 * r + 587 * g + 114 * b) / 1000
-        px[i] = (c0 and (0xFF shl 24)) or (if (lum < t) 0 else 0xFFFFFF)
+        px[i] = (c0 and (0xFF shl 24)) or ((if (lum < t) black else white) and 0xFFFFFF)
     }
 }
 
@@ -201,6 +207,10 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var che = false
     @Volatile private var cheBlack = 50
     private lateinit var cheSwitch: SwitchCompat
+    private val inkW = intArrayOf(0, 0, 0)
+    private val inkB = intArrayOf(100, 100, 100)
+    @Volatile private var colW = 0xFFFFFFFF.toInt()
+    @Volatile private var colB = 0xFF000000.toInt()
     private val history = ArrayList<Step>()
 
     private val exec = Executors.newSingleThreadExecutor()
@@ -235,6 +245,12 @@ class MainActivity : AppCompatActivity() {
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         model = prefs.getString("model", "RGB") ?: "RGB"
         cheBlack = prefs.getInt("cheBlack", 50)
+        for ((key, arr) in listOf("inkW" to inkW, "inkB" to inkB)) {
+            val v = prefs.getString(key, null)?.split(",")?.map { it.toIntOrNull() ?: 0 }
+            if (v != null && v.size == 3) for (i in 0..2) arr[i] = v[i].coerceIn(0, 100)
+        }
+        colW = inkToColor(inkW)
+        colB = inkToColor(inkB)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -314,6 +330,72 @@ class MainActivity : AppCompatActivity() {
         }
         cheBox.addView(cheLabel)
         cheBox.addView(cheSeek)
+
+        // colori del bianco e del nero: si sceglie il cerchio, poi si regolano C, M, Y (0..100)
+        var sel = 0
+        val dotW = View(this)
+        val dotB = View(this)
+        val inkLabels = ArrayList<TextView>()
+        val inkBars = ArrayList<SeekBar>()
+        fun cur() = if (sel == 0) inkW else inkB
+        fun refreshDots() {
+            fun d(col: Int, on: Boolean) = android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(col)
+                setStroke(dp(3), if (on) 0xFF00FF00.toInt() else Color.WHITE)
+            }
+            dotW.background = d(colW, sel == 0)
+            dotB.background = d(colB, sel == 1)
+        }
+        fun showInks() {
+            val a = cur()
+            for (c in 0..2) {
+                inkBars[c].progress = a[c]
+                inkLabels[c].text = "${"CMY"[c]}: ${a[c]}"
+            }
+            refreshDots()
+        }
+        val dots = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(4))
+        }
+        fun lab(t: String) = TextView(this).apply { text = t; setTextColor(Color.WHITE); setPadding(dp(6), 0, dp(16), 0) }
+        dots.addView(dotW, LinearLayout.LayoutParams(dp(30), dp(30)))
+        dots.addView(lab("Bianco"))
+        dots.addView(dotB, LinearLayout.LayoutParams(dp(30), dp(30)))
+        dots.addView(lab("Nero"))
+        dotW.setOnClickListener { sel = 0; showInks() }
+        dotB.setOnClickListener { sel = 1; showInks() }
+        cheBox.addView(dots)
+        for (c in 0..2) {
+            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val l = TextView(this).apply { setTextColor(Color.WHITE); minWidth = dp(54) }
+            val b = SeekBar(this).apply {
+                max = 100
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                        if (!fromUser) return
+                        cur()[c] = p
+                        l.text = "${"CMY"[c]}: $p"
+                        if (sel == 0) colW = inkToColor(inkW) else colB = inkToColor(inkB)
+                        refreshDots()
+                        requestRender()
+                    }
+                    override fun onStartTrackingTouch(sb: SeekBar?) {}
+                    override fun onStopTrackingTouch(sb: SeekBar?) {
+                        prefs.edit().putString("inkW", inkW.joinToString(","))
+                            .putString("inkB", inkB.joinToString(",")).apply()
+                    }
+                })
+            }
+            inkLabels.add(l)
+            inkBars.add(b)
+            row.addView(l)
+            row.addView(b, LinearLayout.LayoutParams(0, -2, 1f))
+            cheBox.addView(row)
+        }
+        showInks()
         cheSwitch = SwitchCompat(this).apply {
             text = "Effetto Che Guevara"
             setTextColor(Color.WHITE)
@@ -337,7 +419,9 @@ class MainActivity : AppCompatActivity() {
         })
         nSave = TextView(this).apply { setTextColor(Color.WHITE) }
         settings.addView(nSave)
-        stage.addView(settings, FrameLayout.LayoutParams(dp(300), -2, Gravity.TOP or Gravity.START))
+        val settingsScroll = android.widget.ScrollView(this)
+        settingsScroll.addView(settings, ViewGroup.LayoutParams(-1, -2))
+        stage.addView(settingsScroll, FrameLayout.LayoutParams(dp(300), -2, Gravity.TOP or Gravity.START))
 
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -478,7 +562,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val out = base.copyOf()
                         applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
-                        if (che) applyThreshold(out, thresholdFor(out, cheBlack))
+                        if (che) applyThreshold(out, thresholdFor(out, cheBlack), colB, colW)
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -539,6 +623,8 @@ class MainActivity : AppCompatActivity() {
         val lvs = lv
         val chOn = che
         val chPct = cheBlack
+        val cB = colB
+        val cW = colW
         val pb = prevBase
         val steps = ArrayList(history)
         val letters = if (model == "RGB") "RGB" else "CMY"
@@ -560,7 +646,7 @@ class MainActivity : AppCompatActivity() {
                     // la soglia si calcola sull'anteprima, così il file salvato è identico a ciò che vedi
                     val tmp = pb!!.copyOf()
                     applyStep(tmp, sp, sg, cm)
-                    applyThreshold(px, thresholdFor(tmp, chPct))
+                    applyThreshold(px, thresholdFor(tmp, chPct), cB, cW)
                 }
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
