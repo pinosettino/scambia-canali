@@ -28,6 +28,8 @@ import androidx.documentfile.provider.DocumentFile
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
+import android.widget.SeekBar
+import androidx.appcompat.widget.SwitchCompat
 
 class Step(val perm: Int, val gain: IntArray, val cmy: Boolean)
 
@@ -41,6 +43,39 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
 }
 
 private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
+
+/**
+ * Soglia per l'effetto a due colori: i pixel con luminosità sotto la soglia diventano neri.
+ * Si sceglie la soglia in modo che la quota di pixel neri sia pctNero (0..100).
+ */
+fun thresholdFor(px: IntArray, pctNero: Int): Int {
+    val h = IntArray(256)
+    for (c0 in px) {
+        val r = (c0 shr 16) and 255
+        val g = (c0 shr 8) and 255
+        val b = c0 and 255
+        h[(299 * r + 587 * g + 114 * b) / 1000]++
+    }
+    val target = px.size.toLong() * pctNero / 100L
+    var acc = 0L
+    for (t in 0..255) {
+        if (acc >= target) return t
+        acc += h[t]
+    }
+    return 256
+}
+
+/** Solo nero e bianco puri, senza grigi. */
+fun applyThreshold(px: IntArray, t: Int) {
+    for (i in px.indices) {
+        val c0 = px[i]
+        val r = (c0 shr 16) and 255
+        val g = (c0 shr 8) and 255
+        val b = c0 and 255
+        val lum = (299 * r + 587 * g + 114 * b) / 1000
+        px[i] = (c0 and (0xFF shl 24)) or (if (lum < t) 0 else 0xFFFFFF)
+    }
+}
 
 /**
  * Livelli per trasformare un negativo in positivo: per ogni canale, il punto più scuro e il più chiaro
@@ -163,6 +198,9 @@ class MainActivity : AppCompatActivity() {
     private var prevOrig: IntArray? = null
     private var prevBase: IntArray? = null
     private var lv: FloatArray? = null
+    @Volatile private var che = false
+    @Volatile private var cheBlack = 50
+    private lateinit var cheSwitch: SwitchCompat
     private val history = ArrayList<Step>()
 
     private val exec = Executors.newSingleThreadExecutor()
@@ -196,6 +234,7 @@ class MainActivity : AppCompatActivity() {
         window.navigationBarColor = Color.BLACK
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         model = prefs.getString("model", "RGB") ?: "RGB"
+        cheBlack = prefs.getInt("cheBlack", 50)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -256,6 +295,36 @@ class MainActivity : AppCompatActivity() {
                 rebuildBase()
             }
         })
+        val cheBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        val cheLabel = TextView(this).apply { setTextColor(Color.WHITE); text = "Nero: $cheBlack" }
+        val cheSeek = SeekBar(this).apply {
+            max = 100
+            progress = cheBlack
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    cheBlack = p
+                    cheLabel.text = "Nero: $p"
+                    if (fromUser) requestRender()
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    prefs.edit().putInt("cheBlack", cheBlack).apply()
+                }
+            })
+        }
+        cheBox.addView(cheLabel)
+        cheBox.addView(cheSeek)
+        cheSwitch = SwitchCompat(this).apply {
+            text = "Effetto Che Guevara"
+            setTextColor(Color.WHITE)
+            setOnCheckedChangeListener { _, on ->
+                che = on
+                cheBox.visibility = if (on) View.VISIBLE else View.GONE
+                requestRender()
+            }
+        }
+        settings.addView(cheSwitch)
+        settings.addView(cheBox)
         settings.addView(Button(this).apply {
             text = "Cartella per apri"
             setOnClickListener { pickOpenDir.launch(prefs.getString("openDir", null)?.let { Uri.parse(it) }) }
@@ -390,6 +459,7 @@ class MainActivity : AppCompatActivity() {
                     history.clear()
                     pal.perm = 0; pal.resetValues(); pal.invalidate()
                     hint.visibility = View.GONE
+                    cheSwitch.isChecked = false
                     requestRender()
                 }
             } catch (e: Throwable) {
@@ -408,6 +478,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val out = base.copyOf()
                         applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
+                        if (che) applyThreshold(out, thresholdFor(out, cheBlack))
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -466,6 +537,9 @@ class MainActivity : AppCompatActivity() {
         val cm = model == "CMY"
         val neg = prefs.getBoolean("negative", false)
         val lvs = lv
+        val chOn = che
+        val chPct = cheBlack
+        val pb = prevBase
         val steps = ArrayList(history)
         val letters = if (model == "RGB") "RGB" else "CMY"
         val nm = imgName
@@ -482,11 +556,17 @@ class MainActivity : AppCompatActivity() {
                 if (neg && lvs != null) applyPositive(px, lvs)
                 for (s in steps) applyStep(px, s.perm, s.gain, s.cmy)
                 applyStep(px, sp, sg, cm)
+                if (chOn) {
+                    // la soglia si calcola sull'anteprima, così il file salvato è identico a ciò che vedi
+                    val tmp = pb!!.copyOf()
+                    applyStep(tmp, sp, sg, cm)
+                    applyThreshold(px, thresholdFor(tmp, chPct))
+                }
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
                 val fmt: Bitmap.CompressFormat
                 val outMime: String
-                when (mt) {
+                when (if (chOn) "image/png" else mt) {
                     "image/jpeg" -> { fmt = Bitmap.CompressFormat.JPEG; outMime = mt }
                     "image/webp" -> {
                         fmt = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
@@ -499,7 +579,7 @@ class MainActivity : AppCompatActivity() {
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
                 val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
                 val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + (if (neg) "_pos" else "") + hist + "_" + label(sp) + ext
+                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + hist + "_" + label(sp) + ext
 
                 val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
                 dir.findFile(fn)?.delete()
