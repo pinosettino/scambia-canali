@@ -1,41 +1,37 @@
 package it.scambiacanali
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.content.res.ColorStateList
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.RadioButton
-import android.widget.RadioGroup
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.Button
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import androidx.documentfile.provider.DocumentFile
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
-import kotlin.math.sqrt
-import kotlin.math.min
-import kotlin.math.floor
-import kotlin.math.ceil
-import android.widget.SeekBar
-import androidx.appcompat.widget.SwitchCompat
-
-class Step(val perm: Int, val gain: IntArray, val cmy: Boolean)
 
 class OpenImage : ActivityResultContracts.OpenDocument() {
     var initial: Uri? = null
@@ -46,273 +42,46 @@ class OpenImage : ActivityResultContracts.OpenDocument() {
     }
 }
 
-private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0.5f).toInt()
+/** Anteprima ridotta dell'immagine originale (pixel ARGB). */
+class Prev(val px: IntArray, val w: Int, val h: Int)
 
-/**
- * Retino a pallini, filtro indipendente: lavora sulla luminosità dell'immagine che arriva dai filtri
- * precedenti. Griglia di celle quadrate (cols colonne), un pallino al centro di ogni cella: più la
- * cella è scura, più il pallino è grande (cella nera = pallino che riempie la cella e si fonde con
- * i vicini, cella bianca = nessun pallino). Pallini nel colore del nero, sfondo nel colore del bianco.
- * Con inverse = true è il contrario: più la cella è chiara, più il pallino è grande; pallini nel
- * colore del bianco su sfondo nel colore del nero.
- */
-/** Raggio (in celle) del pallino che, nella griglia, copre la frazione "dark" della cella; i pallini si fondono oltre 0,5. */
-private fun dotRadius(dark: Double): Float {
-    fun cov(r: Double): Double =
-        if (r <= 0.5) Math.PI * r * r
-        else Math.PI * r * r - 4 * (r * r * Math.acos(0.5 / r) - 0.5 * Math.sqrt(r * r - 0.25))
-    if (dark <= Math.PI / 4) return Math.sqrt(dark / Math.PI).toFloat()
-    var lo = 0.5
-    var hi = 0.7072
-    repeat(40) {
-        val m = (lo + hi) / 2
-        if (cov(m) < dark) lo = m else hi = m
-    }
-    return hi.toFloat()
-}
-
-fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int, inverse: Boolean = false) {
-    val cs = w.toFloat() / cols
-    val rows = ceil((h / cs).toDouble()).toInt()
-    val sum = LongArray(cols * rows)
-    val nt = IntArray(cols * rows)
-    val xc = IntArray(w) { min(cols - 1, (it / cs).toInt()) }
-    for (y in 0 until h) {
-        val yc = min(rows - 1, (y / cs).toInt()) * cols
-        val base = y * w
-        for (x in 0 until w) {
-            val c0 = px[base + x]
-            val lum = (299 * ((c0 shr 16) and 255) + 587 * ((c0 shr 8) and 255) + 114 * (c0 and 255)) / 1000
-            val k = yc + xc[x]
-            nt[k]++
-            sum[k] += lum.toLong()
-        }
-    }
-    val dotCol = if (inverse) white else black
-    val bgCol = if (inverse) black else white
-    java.util.Arrays.fill(px, (0xFF shl 24) or (bgCol and 0xFFFFFF))
-    val bk = (0xFF shl 24) or (dotCol and 0xFFFFFF)
-    val br = (dotCol shr 16) and 255
-    val bg = (dotCol shr 8) and 255
-    val bb = dotCol and 255
-    val rt = FloatArray(256) { dotRadius(it / 255.0) }
-    for (j in 0 until rows) {
-        for (i in 0 until cols) {
-            val k = j * cols + i
-            if (nt[k] == 0) continue
-            val mean = sum[k].toFloat() / (nt[k] * 255f)
-            val dark = if (inverse) mean else 1f - mean
-            if (dark < 0.02f) continue
-            val r = rt[(dark * 255f + 0.5f).toInt().coerceIn(0, 255)] * cs
-            val cx = (i + 0.5f) * cs
-            val cy = (j + 0.5f) * cs
-            val x0 = max(0, floor(cx - r - 1f).toInt())
-            val x1 = min(w - 1, ceil(cx + r + 1f).toInt())
-            val y0 = max(0, floor(cy - r - 1f).toInt())
-            val y1 = min(h - 1, ceil(cy + r + 1f).toInt())
-            for (y in y0..y1) {
-                val dy = y + 0.5f - cy
-                for (x in x0..x1) {
-                    val dx = x + 0.5f - cx
-                    val a = (r - sqrt(dx * dx + dy * dy) + 0.5f).coerceIn(0f, 1f)
-                    if (a <= 0f) continue
-                    val idx = y * w + x
-                    if (a >= 1f) {
-                        px[idx] = bk
-                    } else {
-                        val cur = px[idx]
-                        val rr = (cur shr 16) and 255
-                        val gg = (cur shr 8) and 255
-                        val b2 = cur and 255
-                        val nr = (rr + (br - rr) * a + 0.5f).toInt()
-                        val ng = (gg + (bg - gg) * a + 0.5f).toInt()
-                        val nbl = (b2 + (bb - b2) * a + 0.5f).toInt()
-                        px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nbl
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** Colore ARGB da tre quantità di inchiostro C, M, Y (0..100): 0,0,0 = bianco, 100,100,100 = nero. */
-fun inkToColor(ink: IntArray): Int {
-    fun ch(v: Int) = (255f * (100 - v) / 100f + 0.5f).toInt()
-    return (0xFF shl 24) or (ch(ink[0]) shl 16) or (ch(ink[1]) shl 8) or ch(ink[2])
-}
-
-/**
- * Soglia per l'effetto a due colori: i pixel con luminosità sotto la soglia diventano neri.
- * Si sceglie la soglia in modo che la quota di pixel neri sia pctNero (0..100).
- */
-fun thresholdFor(px: IntArray, pctNero: Int): Int {
-    val h = IntArray(256)
-    for (c0 in px) {
-        val r = (c0 shr 16) and 255
-        val g = (c0 shr 8) and 255
-        val b = c0 and 255
-        h[(299 * r + 587 * g + 114 * b) / 1000]++
-    }
-    val target = px.size.toLong() * pctNero / 100L
-    var acc = 0L
-    for (t in 0..255) {
-        if (acc >= target) return t
-        acc += h[t]
-    }
-    return 256
-}
-
-/** Solo due colori, senza grigi: scuri -> colore del nero, chiari -> colore del bianco. */
-fun applyThreshold(px: IntArray, t: Int, black: Int, white: Int) {
-    for (i in px.indices) {
-        val c0 = px[i]
-        val r = (c0 shr 16) and 255
-        val g = (c0 shr 8) and 255
-        val b = c0 and 255
-        val lum = (299 * r + 587 * g + 114 * b) / 1000
-        px[i] = (c0 and (0xFF shl 24)) or ((if (lum < t) black else white) and 0xFFFFFF)
-    }
-}
-
-/**
- * Livelli per trasformare un negativo in positivo: per ogni canale, il punto più scuro e il più chiaro
- * dell'immagine già invertita (si scartano lo 0,5% di pixel estremi, per polvere e bordi).
- * Restituisce [min R, min G, min B, max R, max G, max B].
- */
-fun computeLevels(px: IntArray): FloatArray {
-    val h = Array(3) { IntArray(256) }
-    for (c0 in px) {
-        h[0][255 - ((c0 shr 16) and 255)]++
-        h[1][255 - ((c0 shr 8) and 255)]++
-        h[2][255 - (c0 and 255)]++
-    }
-    val n = px.size
-    val lo = (n * 0.005).toInt()
-    val hi = (n * 0.995).toInt()
-    val r = FloatArray(6)
-    for (c in 0..2) {
-        var acc = 0
-        var l = 0
-        var hh = 255
-        var gotLo = false
-        for (v in 0..255) {
-            acc += h[c][v]
-            if (!gotLo && acc > lo) { l = v; gotLo = true }
-            if (acc >= hi) { hh = v; break }
-        }
-        r[c] = l.toFloat()
-        r[3 + c] = hh.toFloat()
-    }
-    return r
-}
-
-/** Inverte i valori e stira ogni canale tra il suo minimo e massimo: toglie anche la dominante arancione. */
-fun applyPositive(px: IntArray, lv: FloatArray) {
-    val s0 = 255f / max(lv[3] - lv[0], 1f)
-    val s1 = 255f / max(lv[4] - lv[1], 1f)
-    val s2 = 255f / max(lv[5] - lv[2], 1f)
-    for (i in px.indices) {
-        val c0 = px[i]
-        val r = 255 - ((c0 shr 16) and 255)
-        val g = 255 - ((c0 shr 8) and 255)
-        val b = 255 - (c0 and 255)
-        px[i] = (c0 and (0xFF shl 24)) or
-            (cl((r - lv[0]) * s0) shl 16) or (cl((g - lv[1]) * s1) shl 8) or cl((b - lv[2]) * s2)
-    }
-}
-
-/**
- * Scambia i canali e poi regola i colori: 50 = valore originale, 0 = canale spento, 100 = doppio.
- * RGB: si moltiplica la luce del canale. CMY: si moltiplica l'inchiostro.
- * Il cursore c agisce sul canale indicato dalla sua lettera. La luminosità resta quella
- * dell'immagine prima della regolazione: con tutti i canali a 0 si ottiene il bianco e nero.
- * Con i tre canali uguali è la saturazione classica; l'effetto si ferma prima che
- * un canale esca dal campo 0..255, quindi nessun pixel va in saturazione extra.
- */
-fun applyStep(px: IntArray, perm: Int, gain: IntArray, cmy: Boolean) {
-    val p = PERMS[perm]
-    val g = FloatArray(3)
-    for (c in 0..2) g[p[c]] = gain[c] / 50f
-    val v = FloatArray(3)
-    for (i in px.indices) {
-        val c0 = px[i]
-        v[0] = ((c0 shr 16) and 255).toFloat()
-        v[1] = ((c0 shr 8) and 255).toFloat()
-        v[2] = (c0 and 255).toFloat()
-        val o0 = v[p[0]]
-        val o1 = v[p[1]]
-        val o2 = v[p[2]]
-        val y = 0.299f * o0 + 0.587f * o1 + 0.114f * o2
-        val t0: Float
-        val t1: Float
-        val t2: Float
-        if (cmy) {
-            t0 = 255f - (255f - o0) * g[0]
-            t1 = 255f - (255f - o1) * g[1]
-            t2 = 255f - (255f - o2) * g[2]
-        } else {
-            t0 = o0 * g[0]
-            t1 = o1 * g[1]
-            t2 = o2 * g[2]
-        }
-        val d = y - (0.299f * t0 + 0.587f * t1 + 0.114f * t2)
-        var u0 = t0 + d
-        var u1 = t1 + d
-        var u2 = t2 + d
-        // se un canale uscirebbe da 0..255, si riduce l'effetto fino al limite
-        val e0 = u0 - o0
-        val e1 = u1 - o1
-        val e2 = u2 - o2
-        var a = 1f
-        if (u0 > 255f) a = minOf(a, (255f - o0) / e0) else if (u0 < 0f) a = minOf(a, o0 / -e0)
-        if (u1 > 255f) a = minOf(a, (255f - o1) / e1) else if (u1 < 0f) a = minOf(a, o1 / -e1)
-        if (u2 > 255f) a = minOf(a, (255f - o2) / e2) else if (u2 < 0f) a = minOf(a, o2 / -e2)
-        if (a < 1f) {
-            u0 = o0 + a * e0
-            u1 = o1 + a * e1
-            u2 = o2 + a * e2
-        }
-        px[i] = (c0 and (0xFF shl 24)) or (cl(u0) shl 16) or (cl(u1) shl 8) or cl(u2)
-    }
-}
+/** Stato di un filtro con pannello: acceso/spento, colonne, soglia del nero e i suoi due colori (valori R,G,B 0..100). */
+class FState(
+    var on: Boolean = false,
+    var cols: Int = 60,
+    var black: Int = 50,
+    val w: IntArray = intArrayOf(100, 100, 100),
+    val b: IntArray = intArrayOf(0, 0, 0)
+)
 
 class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var pal: PaletteView
     private lateinit var img: ImageView
     private lateinit var hint: TextView
-    private lateinit var palBtn: TextView
-    private lateinit var settings: LinearLayout
-    private lateinit var nOpen: TextView
-    private lateinit var nSave: TextView
+    private lateinit var settingsView: View
+
+    private val overlays = ArrayList<View>()
+    private val refreshers = ArrayList<() -> Unit>()
+    private val menuSync = ArrayList<() -> Unit>()
+    private var syncing = false
 
     private var model = "RGB"
+    private var palOn = true
+    private var negOn = false
+    private val che = FState(black = 50)
+    private val dkb = FState()
+    private val dkw = FState()
+
     private var origUri: Uri? = null
     private var imgName = "immagine.png"
     private var mime = "image/png"
-    private var pw = 0
-    private var ph = 0
-    private var prevOrig: IntArray? = null
-    private var prevBase: IntArray? = null
-    private var lv: FloatArray? = null
-    @Volatile private var che = false
-    @Volatile private var cheBlack = 50
-    private lateinit var cheSwitch: SwitchCompat
-    private lateinit var dotsSwitch: SwitchCompat
-    private lateinit var duoSwitch: SwitchCompat
-    @Volatile private var duoOn = false
-    @Volatile private var duoCols = 60
-    @Volatile private var dotsOn = false
-    @Volatile private var dotCols = 60
-    private val inkW = intArrayOf(0, 0, 0)
-    private val inkB = intArrayOf(100, 100, 100)
-    @Volatile private var colW = 0xFFFFFFFF.toInt()
-    @Volatile private var colB = 0xFF000000.toInt()
-    private val history = ArrayList<Step>()
+    @Volatile private var prev: Prev? = null
+    @Volatile private var lv: FloatArray? = null
 
     private val exec = Executors.newSingleThreadExecutor()
     private val busy = AtomicBoolean(false)
-    private val dirty = AtomicBoolean(false)
+    private val latest = AtomicReference<Fx?>(null)
 
     private val openContract = OpenImage()
     private val openImage = registerForActivityResult(openContract) { uri -> if (uri != null) loadImage(uri) }
@@ -326,52 +95,26 @@ class MainActivity : AppCompatActivity() {
     private fun dp(x: Int) = (x * resources.displayMetrics.density).toInt()
     private fun msg(t: String) = runOnUiThread { Toast.makeText(this, t, Toast.LENGTH_SHORT).show() }
 
-    private fun tv(t: String, f: () -> Unit): TextView = TextView(this).apply {
-        text = t
-        setTextColor(Color.WHITE)
-        textSize = 15f
-        isSingleLine = true
-        setPadding(dp(6), dp(10), dp(6), dp(10))
-        setOnClickListener { f() }
-    }
-
+    // ---------- costruzione dell'interfaccia ----------
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
         model = prefs.getString("model", "RGB") ?: "RGB"
-        cheBlack = prefs.getInt("cheBlack", 50)
-        dotCols = prefs.getInt("dotCols", 60)
-        duoCols = prefs.getInt("duoCols", 60)
-        for ((key, arr) in listOf("inkW" to inkW, "inkB" to inkB)) {
-            val v = prefs.getString(key, null)?.split(",")?.map { it.toIntOrNull() ?: 0 }
-            if (v != null && v.size == 3) for (i in 0..2) arr[i] = v[i].coerceIn(0, 100)
-        }
-        colW = inkToColor(inkW)
-        colB = inkToColor(inkB)
+        negOn = prefs.getBoolean("negative", false)
+        loadState("che", che)
+        loadState("dkb", dkb)
+        loadState("dkw", dkw)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(0xFF111111.toInt())
         }
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.BLACK)
-            setPadding(dp(4), 0, dp(4), 0)
-        }
-        bar.addView(tv("\u2699") { settings.visibility = if (settings.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
-            .apply { textSize = 24f })
-        bar.addView(tv("apri") { openClicked() })
-        bar.addView(tv("salva") { save() })
-        bar.addView(tv("azzera") { resetAll() })
-        palBtn = tv("palette RGB") { setPalette(pal.visibility != View.VISIBLE) }
-        bar.addView(palBtn)
-
         val stage = FrameLayout(this)
+
         img = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        img.setOnClickListener { setPalette(false); settings.visibility = View.GONE }
+        img.setOnClickListener { showOnly(null) }
         stage.addView(img, FrameLayout.LayoutParams(-1, -1))
         hint = TextView(this).apply {
             text = "Tocca \u00abapri\u00bb per scegliere un'immagine."
@@ -384,229 +127,164 @@ class MainActivity : AppCompatActivity() {
         pal = PaletteView(this).apply { visibility = View.GONE }
         pal.onPickPerm = { i -> pickPerm(i) }
         pal.onGain = { requestRender() }
-        stage.addView(pal, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
 
-        settings = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xFF808080.toInt())
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            visibility = View.GONE
-        }
-        settings.addView(TextView(this).apply { text = "Palette dell'immagine"; setTextColor(Color.WHITE); textSize = 16f })
-        val rg = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
-        val rbRgb = RadioButton(this).apply { text = "RGB"; id = View.generateViewId() }
-        val rbCmy = RadioButton(this).apply { text = "CMY"; id = View.generateViewId() }
-        rg.addView(rbRgb)
-        rg.addView(rbCmy)
-        (if (model == "RGB") rbRgb else rbCmy).isChecked = true
-        rg.setOnCheckedChangeListener { _, id -> setModel(if (id == rbRgb.id) "RGB" else "CMY") }
-        settings.addView(rg)
-        settings.addView(androidx.appcompat.widget.SwitchCompat(this).apply {
-            text = "Negativo \u2192 positivo"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("negative", false)
-            setOnCheckedChangeListener { _, on ->
-                prefs.edit().putBoolean("negative", on).apply()
-                rebuildBase()
-            }
-        })
-        val cheBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        val cheLabel = TextView(this).apply { setTextColor(Color.WHITE); text = "Nero: $cheBlack" }
-        val cheSeek = SeekBar(this).apply {
-            max = 100
-            progress = cheBlack
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    cheBlack = p
-                    cheLabel.text = "Nero: $p"
-                    if (fromUser) requestRender()
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {
-                    prefs.edit().putInt("cheBlack", cheBlack).apply()
-                }
-            })
-        }
-        cheBox.addView(cheLabel)
-        cheBox.addView(cheSeek)
+        val screenW = resources.displayMetrics.widthPixels
+        val settingsP = buildSettings()
+        settingsView = settingsP
+        val panelChe = buildPanel("che", "Effetto Che Guevara", che, withBlack = true, withCols = false)
+        val panelDkb = buildPanel("dkb", "Retino a pallini nero", dkb, withBlack = false, withCols = true)
+        val panelDkw = buildPanel("dkw", "Retino a pallini bianco", dkw, withBlack = false, withCols = true)
+        val menuP = buildMenu(panelChe, panelDkb, panelDkw)
 
-        // colori del bianco e del nero: si sceglie il cerchio, poi si regolano C, M, Y (0..100)
-        val colorBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        var sel = 0
-        val dotW = View(this)
-        val dotB = View(this)
-        val inkLabels = ArrayList<TextView>()
-        val inkBars = ArrayList<SeekBar>()
-        fun cur() = if (sel == 0) inkW else inkB
-        fun refreshDots() {
-            fun d(col: Int, on: Boolean) = android.graphics.drawable.GradientDrawable().apply {
-                shape = android.graphics.drawable.GradientDrawable.OVAL
-                setColor(col)
-                setStroke(dp(3), if (on) 0xFF00FF00.toInt() else Color.WHITE)
-            }
-            dotW.background = d(colW, sel == 0)
-            dotB.background = d(colB, sel == 1)
-        }
-        fun showInks() {
-            val a = cur()
-            for (c in 0..2) {
-                inkBars[c].progress = a[c]
-                inkLabels[c].text = "${"CMY"[c]}: ${a[c]}"
-            }
-            refreshDots()
-        }
-        val dots = LinearLayout(this).apply {
+        addOverlay(stage, pal, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END, 0)
+        addOverlay(stage, settingsP, (screenW * 0.62f).toInt(), Gravity.TOP or Gravity.START, 6)
+        addOverlay(stage, menuP, (screenW * 0.62f).toInt(), Gravity.TOP or Gravity.END, 6)
+        for (p in listOf(panelChe, panelDkb, panelDkw)) addOverlay(stage, p, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.TOP, 8)
+
+        val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, dp(8), 0, dp(4))
+            setBackgroundColor(Color.BLACK)
+            setPadding(dp(6), 0, dp(6), 0)
         }
-        fun lab(t: String) = TextView(this).apply { text = t; setTextColor(Color.WHITE); setPadding(dp(6), 0, dp(16), 0) }
-        dots.addView(dotW, LinearLayout.LayoutParams(dp(30), dp(30)))
-        dots.addView(lab("Bianco"))
-        dots.addView(dotB, LinearLayout.LayoutParams(dp(30), dp(30)))
-        dots.addView(lab("Nero"))
-        dotW.setOnClickListener { sel = 0; showInks() }
-        dotB.setOnClickListener { sel = 1; showInks() }
-        colorBox.addView(dots)
-        for (c in 0..2) {
-            val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-            val l = TextView(this).apply { setTextColor(Color.WHITE); minWidth = dp(54) }
-            val b = SeekBar(this).apply {
-                max = 100
-                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                        if (!fromUser) return
-                        cur()[c] = p
-                        l.text = "${"CMY"[c]}: $p"
-                        if (sel == 0) colW = inkToColor(inkW) else colB = inkToColor(inkB)
-                        refreshDots()
-                        requestRender()
-                    }
-                    override fun onStartTrackingTouch(sb: SeekBar?) {}
-                    override fun onStopTrackingTouch(sb: SeekBar?) {
-                        prefs.edit().putString("inkW", inkW.joinToString(","))
-                            .putString("inkB", inkB.joinToString(",")).apply()
-                    }
-                })
-            }
-            inkLabels.add(l)
-            inkBars.add(b)
-            row.addView(l)
-            row.addView(b, LinearLayout.LayoutParams(0, -2, 1f))
-            colorBox.addView(row)
-        }
-        showInks()
-
-        // retino a pallini: numero di colonne della griglia (10..200)
-        val dotsBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        val dotsLabel = TextView(this).apply { setTextColor(Color.WHITE); text = "Colonne: $dotCols" }
-        val dotsSeek = SeekBar(this).apply {
-            max = 190
-            progress = dotCols - 10
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    dotCols = p + 10
-                    dotsLabel.text = "Colonne: $dotCols"
-                    if (fromUser) requestRender()
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {
-                    prefs.edit().putInt("dotCols", dotCols).apply()
-                }
-            })
-        }
-        dotsBox.addView(dotsLabel)
-        dotsBox.addView(dotsSeek)
-        dotsSwitch = SwitchCompat(this).apply {
-            text = "Retino a pallini"
-            setTextColor(Color.WHITE)
-            setOnCheckedChangeListener { _, on ->
-                dotsOn = on
-                dotsBox.visibility = if (on) View.VISIBLE else View.GONE
-                colorBox.visibility = if (che || dotsOn || duoOn) View.VISIBLE else View.GONE
-                requestRender()
-            }
-        }
-        val duoBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-        val duoLabel = TextView(this).apply { setTextColor(Color.WHITE); text = "Colonne: $duoCols" }
-        val duoSeek = SeekBar(this).apply {
-            max = 190
-            progress = duoCols - 10
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
-                    duoCols = p + 10
-                    duoLabel.text = "Colonne: $duoCols"
-                    if (fromUser) requestRender()
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {
-                    prefs.edit().putInt("duoCols", duoCols).apply()
-                }
-            })
-        }
-        duoBox.addView(duoLabel)
-        duoBox.addView(duoSeek)
-        duoSwitch = SwitchCompat(this).apply {
-            text = "Retino a pallini bianchi"
-            setTextColor(Color.WHITE)
-            setOnCheckedChangeListener { _, on ->
-                duoOn = on
-                duoBox.visibility = if (on) View.VISIBLE else View.GONE
-                colorBox.visibility = if (che || dotsOn || duoOn) View.VISIBLE else View.GONE
-                requestRender()
-            }
-        }
-        cheSwitch = SwitchCompat(this).apply {
-            text = "Effetto Che Guevara"
-            setTextColor(Color.WHITE)
-            setOnCheckedChangeListener { _, on ->
-                che = on
-                cheBox.visibility = if (on) View.VISIBLE else View.GONE
-                colorBox.visibility = if (che || dotsOn || duoOn) View.VISIBLE else View.GONE
-                requestRender()
-            }
-        }
-        settings.addView(cheSwitch)
-        settings.addView(cheBox)
-        settings.addView(dotsSwitch)
-        settings.addView(dotsBox)
-        settings.addView(duoSwitch)
-        settings.addView(duoBox)
-        settings.addView(colorBox)
-        settings.addView(Button(this).apply {
-            text = "Cartella per apri"
-            setOnClickListener { pickOpenDir.launch(prefs.getString("openDir", null)?.let { Uri.parse(it) }) }
-        })
-        nOpen = TextView(this).apply { setTextColor(Color.WHITE) }
-        settings.addView(nOpen)
-        settings.addView(Button(this).apply {
-            text = "Cartella per salva"
-            setOnClickListener { pickSaveDir.launch(prefs.getString("saveDir", null)?.let { Uri.parse(it) }) }
-        })
-        nSave = TextView(this).apply { setTextColor(Color.WHITE) }
-        settings.addView(nSave)
-        val settingsScroll = android.widget.ScrollView(this)
-        settingsScroll.addView(settings, ViewGroup.LayoutParams(-1, -2))
-        stage.addView(settingsScroll, FrameLayout.LayoutParams(dp(300), -2, Gravity.TOP or Gravity.START))
+        bar.addView(tv("\u2699") { toggle(settingsP) }.apply { textSize = 28f; setTextColor(0xFFCCCCCC.toInt()) })
+        bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        bar.addView(tv("apri") { openClicked() })
+        bar.addView(tv("salva") { save() })
+        bar.addView(tv("menu \u2630") { toggle(menuP) })
 
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
         setContentView(root)
         applyModel()
-        refreshNames()
+        refreshers.forEach { it() }
     }
 
-    private fun setPalette(open: Boolean) {
-        pal.visibility = if (open) View.VISIBLE else View.GONE
-        palBtn.setTextColor(if (open) 0xFF00E000.toInt() else Color.WHITE)
+    private fun tv(t: String, f: () -> Unit): TextView = TextView(this).apply {
+        text = t
+        setTextColor(Color.WHITE)
+        textSize = 20f
+        isSingleLine = true
+        setPadding(dp(10), dp(12), dp(10), dp(12))
+        setOnClickListener { f() }
     }
 
-    // ---------- impostazioni ----------
+    private fun addOverlay(stage: FrameLayout, v: View, w: Int, gravity: Int, margin: Int) {
+        val lp = FrameLayout.LayoutParams(w, FrameLayout.LayoutParams.WRAP_CONTENT, gravity)
+        lp.setMargins(dp(margin), dp(margin), dp(margin), dp(margin))
+        stage.addView(v, lp)
+        overlays.add(v)
+    }
+
+    /** Mostra solo il pannello indicato (o nessuno). */
+    private fun showOnly(v: View?) {
+        for (o in overlays) o.visibility = View.GONE
+        v?.visibility = View.VISIBLE
+    }
+
+    private fun toggle(v: View) {
+        if (v.visibility == View.VISIBLE) showOnly(null) else showOnly(v)
+    }
+
+    private fun SeekBar.cyan() {
+        progressTintList = ColorStateList.valueOf(Color.CYAN)
+        thumbTintList = ColorStateList.valueOf(Color.CYAN)
+        progressBackgroundTintList = ColorStateList.valueOf(Color.WHITE)
+    }
+
+    private fun seek(maxV: Int, start: Int, onChange: (Int, Boolean) -> Unit, onStop: () -> Unit): SeekBar =
+        SeekBar(this).apply {
+            max = maxV
+            progress = start
+            cyan()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) = onChange(p, fromUser)
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) = onStop()
+            })
+        }
+
+    // ---------- impostazioni (ingranaggio) ----------
+    private fun buildSettings(): LinearLayout {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(20))
+            setBackgroundColor(0xFFE6E6E6.toInt())
+            visibility = View.GONE
+        }
+        val dotC = View(this)
+        val dotR = View(this)
+        fun dot(v: View, on: Boolean) {
+            v.background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(if (on) 0xFF00FF00.toInt() else Color.WHITE)
+                setStroke(dp(3), Color.BLACK)
+            }
+        }
+        fun big(t: String, pad: Int) = TextView(this).apply {
+            text = t
+            setTextColor(Color.BLACK)
+            textSize = 24f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(8), 0, dp(pad), 0)
+        }
+        val labC = big("CMY", 22)
+        val labR = big("RGB", 0)
+        val row = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        row.addView(dotC, LinearLayout.LayoutParams(dp(32), dp(32)))
+        row.addView(labC)
+        row.addView(dotR, LinearLayout.LayoutParams(dp(32), dp(32)))
+        row.addView(labR)
+        for (v in listOf<View>(dotC, labC)) v.setOnClickListener { setModel("CMY") }
+        for (v in listOf<View>(dotR, labR)) v.setOnClickListener { setModel("RGB") }
+        box.addView(row)
+        refreshers.add { dot(dotC, model == "CMY"); dot(dotR, model == "RGB") }
+
+        fun folder(title: String, key: String, launch: () -> Unit) {
+            val t = TextView(this).apply {
+                text = title
+                textSize = 22f
+                setTextColor(Color.BLACK)
+                setPadding(0, dp(20), 0, 0)
+            }
+            val p = TextView(this).apply { textSize = 16f; setTextColor(0xFF333333.toInt()) }
+            t.setOnClickListener { launch() }
+            p.setOnClickListener { launch() }
+            box.addView(t)
+            box.addView(p)
+            refreshers.add { p.text = "(" + folderLabel(key) + ")" }
+        }
+        folder("CARTELLA APRI", "openDir") { pickOpenDir.launch(prefs.getString("openDir", null)?.let { Uri.parse(it) }) }
+        folder("CARTELLA SALVA", "saveDir") { pickSaveDir.launch(prefs.getString("saveDir", null)?.let { Uri.parse(it) }) }
+        return box
+    }
+
+    private fun folderLabel(key: String): String {
+        val s = prefs.getString(key, null) ?: return "DCIM/fotolab"
+        return try {
+            DocumentsContract.getTreeDocumentId(Uri.parse(s)).substringAfter(':')
+        } catch (e: Exception) {
+            "cartella scelta"
+        }
+    }
+
+    private fun rememberDir(key: String, u: Uri) {
+        try {
+            contentResolver.takePersistableUriPermission(
+                u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+        }
+        prefs.edit().putString(key, u.toString()).apply()
+        refreshers.forEach { it() }
+    }
+
     private fun setModel(m: String) {
         model = m
         prefs.edit().putString("model", m).apply()
         pal.resetValues()
         applyModel()
+        refreshers.forEach { it() }
         requestRender()
     }
 
@@ -618,33 +296,184 @@ class MainActivity : AppCompatActivity() {
             pal.letters = arrayOf("C", "M", "Y")
             pal.colors = intArrayOf(0xFF00FFFF.toInt(), 0xFFFF00FF.toInt(), 0xFFFFFF00.toInt())
         }
-        palBtn.text = "palette $model"
         pal.invalidate()
     }
 
-    private fun rememberDir(key: String, u: Uri) {
-        try {
-            contentResolver.takePersistableUriPermission(
-                u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-        } catch (e: Exception) {
-        }
-        prefs.edit().putString(key, u.toString()).apply()
-        refreshNames()
+    // ---------- menu (≡) ----------
+    private fun styleSwitch(s: SwitchCompat) {
+        val states = arrayOf(intArrayOf(android.R.attr.state_checked), intArrayOf())
+        s.thumbTintList = ColorStateList(states, intArrayOf(Color.CYAN, 0xFFBBBBBB.toInt()))
+        s.trackTintList = ColorStateList(states, intArrayOf(0xFF2A7F7F.toInt(), 0xFF666666.toInt()))
     }
 
-    private fun dirName(key: String): String {
-        val s = prefs.getString(key, null) ?: return "non scelta"
-        return try {
-            DocumentFile.fromTreeUri(this, Uri.parse(s))?.name ?: "cartella"
-        } catch (e: Exception) {
-            "cartella"
+    private fun menuRow(box: LinearLayout, label: String, get: () -> Boolean, set: (Boolean) -> Unit, panel: View?) {
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(5), 0, dp(5))
+        }
+        val sw = SwitchCompat(this)
+        styleSwitch(sw)
+        sw.isChecked = get()
+        sw.setOnCheckedChangeListener { _, on ->
+            if (syncing) return@setOnCheckedChangeListener
+            set(on)
+            requestRender()
+            if (panel != null) {
+                if (on) showOnly(panel) else panel.visibility = View.GONE
+            }
+        }
+        val t = TextView(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            setPadding(dp(10), dp(4), 0, dp(4))
+        }
+        t.setOnClickListener { if (panel != null) toggle(panel) }
+        row.addView(sw)
+        row.addView(t)
+        box.addView(row)
+        menuSync.add { sw.isChecked = get() }
+    }
+
+    private fun buildMenu(panelChe: View, panelDkb: View, panelDkw: View): LinearLayout {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(14))
+            background = GradientDrawable().apply { setColor(0xB3000000.toInt()) }
+            visibility = View.GONE
+        }
+        menuRow(box, "PALETTE FOTO", { palOn }, { palOn = it }, pal)
+        menuRow(box, "NEGATIVO -> POSITIVO", { negOn }, {
+            negOn = it
+            prefs.edit().putBoolean("negative", it).apply()
+        }, null)
+        menuRow(box, "EFFETTO CHE GUEVARA", { che.on }, { che.on = it }, panelChe)
+        menuRow(box, "RETINO A PALLINI NERI", { dkb.on }, { dkb.on = it }, panelDkb)
+        menuRow(box, "RETINO A PALLINI BIANCHI", { dkw.on }, { dkw.on = it }, panelDkw)
+        val az = TextView(this).apply {
+            text = "AZZERA"
+            setTextColor(Color.WHITE)
+            textSize = 17f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(4), dp(16), 0, dp(4))
+            setOnClickListener { resetAll(); showOnly(null) }
+        }
+        box.addView(az)
+        return box
+    }
+
+    private fun syncMenu() {
+        syncing = true
+        menuSync.forEach { it() }
+        syncing = false
+    }
+
+    // ---------- pannelli dei filtri ----------
+    private fun saveState(key: String, f: FState) {
+        prefs.edit()
+            .putInt("$key.cols", f.cols)
+            .putInt("$key.black", f.black)
+            .putString("$key.w", f.w.joinToString(","))
+            .putString("$key.b", f.b.joinToString(","))
+            .apply()
+    }
+
+    private fun loadState(key: String, f: FState) {
+        f.cols = prefs.getInt("$key.cols", f.cols).coerceIn(10, 200)
+        f.black = prefs.getInt("$key.black", f.black).coerceIn(0, 100)
+        for ((suffix, arr) in listOf("w" to f.w, "b" to f.b)) {
+            val v = prefs.getString("$key.$suffix", null)?.split(",")?.map { it.toIntOrNull() ?: 0 }
+            if (v != null && v.size == 3) for (i in 0..2) arr[i] = v[i].coerceIn(0, 100)
         }
     }
 
-    private fun refreshNames() {
-        nOpen.text = dirName("openDir")
-        nSave.text = dirName("saveDir")
+    private fun buildPanel(key: String, title: String, f: FState, withBlack: Boolean, withCols: Boolean): LinearLayout {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(12), dp(16), dp(14))
+            background = GradientDrawable().apply { setColor(0xB3000000.toInt()) }
+            visibility = View.GONE
+        }
+        fun lab(t: String) = TextView(this).apply { text = t; setTextColor(Color.WHITE); textSize = 18f }
+        box.addView(lab(title).apply { textSize = 20f; typeface = Typeface.DEFAULT_BOLD })
+
+        if (withBlack) {
+            val l = lab("Nero: ${f.black}")
+            box.addView(l)
+            box.addView(seek(100, f.black, { p, user ->
+                f.black = p
+                l.text = "Nero: $p"
+                if (user) requestRender()
+            }, { saveState(key, f) }))
+        }
+        if (withCols) {
+            val l = lab("Colonne: ${f.cols}")
+            box.addView(l)
+            box.addView(seek(190, f.cols - 10, { p, user ->
+                f.cols = p + 10
+                l.text = "Colonne: ${f.cols}"
+                if (user) requestRender()
+            }, { saveState(key, f) }))
+        }
+
+        // i due colori del filtro: si sceglie il cerchio, poi si regolano i tre cursori
+        var sel = 0
+        val dotW = View(this)
+        val dotB = View(this)
+        val bars = ArrayList<SeekBar>()
+        val labels = ArrayList<TextView>()
+        fun cur() = if (sel == 0) f.w else f.b
+        fun letters() = if (model == "CMY") "CMY" else "RGB"
+        fun shown(v: Int) = if (model == "CMY") 100 - v else v
+        fun ring(col: Int, on: Boolean) = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(col)
+            setStroke(dp(4), if (on) 0xFF00FF00.toInt() else Color.WHITE)
+        }
+        fun refreshDots() {
+            dotW.background = ring(rgb100ToArgb(f.w), sel == 0)
+            dotB.background = ring(rgb100ToArgb(f.b), sel == 1)
+        }
+        fun refresh() {
+            val a = cur()
+            for (c in 0..2) {
+                bars[c].progress = shown(a[c])
+                labels[c].text = "${letters()[c]}:${shown(a[c])}"
+            }
+            refreshDots()
+        }
+
+        val row = LinearLayout(this).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(6))
+        }
+        row.addView(dotW, LinearLayout.LayoutParams(dp(40), dp(40)))
+        row.addView(lab("Bianco").apply { setPadding(dp(12), 0, dp(28), 0) })
+        row.addView(dotB, LinearLayout.LayoutParams(dp(40), dp(40)))
+        row.addView(lab("Nero").apply { setPadding(dp(12), 0, 0, 0) })
+        dotW.setOnClickListener { sel = 0; refresh() }
+        dotB.setOnClickListener { sel = 1; refresh() }
+        box.addView(row)
+
+        for (c in 0..2) {
+            val r = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+            val l = lab("").apply { minWidth = dp(76); typeface = Typeface.DEFAULT_BOLD }
+            val s = seek(100, 0, { p, user ->
+                if (user) {
+                    cur()[c] = if (model == "CMY") 100 - p else p
+                    l.text = "${letters()[c]}:$p"
+                    refreshDots()
+                    requestRender()
+                }
+            }, { saveState(key, f) })
+            labels.add(l)
+            bars.add(s)
+            r.addView(l)
+            r.addView(s, LinearLayout.LayoutParams(0, -2, 1f))
+            box.addView(r)
+        }
+        refreshers.add { refresh() }
+        return box
     }
 
     // ---------- immagini ----------
@@ -683,10 +512,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openClicked() {
+        showOnly(null)
         openContract.initial = try {
-            prefs.getString("openDir", null)?.let {
-                val t = Uri.parse(it)
+            val chosen = prefs.getString("openDir", null)
+            if (chosen != null) {
+                val t = Uri.parse(chosen)
                 DocumentsContract.buildDocumentUriUsingTree(t, DocumentsContract.getTreeDocumentId(t))
+            } else {
+                DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", "primary:DCIM/fotolab")
             }
         } catch (e: Exception) {
             null
@@ -703,15 +536,13 @@ class MainActivity : AppCompatActivity() {
                 val nm = DocumentFile.fromSingleUri(this, uri)?.name ?: "immagine.png"
                 val mt = contentResolver.getType(uri) ?: "image/png"
                 runOnUiThread {
-                    origUri = uri; imgName = nm; mime = mt
-                    pw = b.width; ph = b.height
-                    prevOrig = px; lv = computeLevels(px); prevBase = basePixels(px)
-                    history.clear()
-                    pal.perm = 0; pal.resetValues(); pal.invalidate()
+                    origUri = uri
+                    imgName = nm
+                    mime = mt
+                    lv = computeLevels(px)
+                    prev = Prev(px, b.width, b.height)
+                    resetFilters()
                     hint.visibility = View.GONE
-                    cheSwitch.isChecked = false
-                    dotsSwitch.isChecked = false
-                    duoSwitch.isChecked = false
                     requestRender()
                 }
             } catch (e: Throwable) {
@@ -720,87 +551,77 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
+    /** Palette neutra, effetto Che e retini spenti. Il negativo resta com'è: è un'impostazione che si cambia dal menu. */
+    private fun resetFilters() {
+        pal.perm = 0
+        pal.resetValues()
+        palOn = true
+        che.on = false
+        dkb.on = false
+        dkw.on = false
+        syncMenu()
+    }
+
+    private fun resetAll() {
+        if (prev == null) return
+        resetFilters()
+        requestRender()
+    }
+
+    private fun pickPerm(i: Int) {
+        pal.perm = i
+        pal.resetValues()
+        requestRender()
+    }
+
+    // ---------- calcolo dell'anteprima ----------
+    private fun makeFx() = Fx(
+        neg = negOn, lv = lv,
+        pal = palOn, perm = pal.perm, gain = pal.gain.copyOf(), cmy = model == "CMY",
+        che = che.on, cheBlack = che.black, cheB = rgb100ToArgb(che.b), cheW = rgb100ToArgb(che.w),
+        dkb = dkb.on, dkbCols = dkb.cols, dkbB = rgb100ToArgb(dkb.b), dkbW = rgb100ToArgb(dkb.w),
+        dkw = dkw.on, dkwCols = dkw.cols, dkwB = rgb100ToArgb(dkw.b), dkwW = rgb100ToArgb(dkw.w)
+    )
+
     private fun requestRender() {
-        dirty.set(true)
+        latest.set(makeFx())
+        kick()
+    }
+
+    private fun kick() {
         if (!busy.compareAndSet(false, true)) return
         exec.execute {
             try {
-                while (dirty.getAndSet(false)) {
-                    val base = prevBase ?: break
+                while (true) {
+                    val fx = latest.getAndSet(null) ?: break
+                    val pv = prev ?: break
                     try {
-                        val out = base.copyOf()
-                        applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
-                        if (che) applyThreshold(out, thresholdFor(out, cheBlack), colB, colW)
-                        if (dotsOn) applyDots(out, pw, ph, dotCols, colB, colW)
-                        if (duoOn) applyDots(out, pw, ph, duoCols, colB, colW, true)
-                        val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
+                        val out = pv.px.copyOf()
+                        runFx(out, pv.w, pv.h, fx, null)
+                        val bmp = Bitmap.createBitmap(out, pv.w, pv.h, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
                     }
                 }
             } finally {
                 busy.set(false)
-                if (dirty.get()) requestRender()
+                if (latest.get() != null) kick()
             }
         }
     }
 
-    /** Ogni scambio parte sempre dall'immagine originale; toccando un pallino i cursori tornano a 100. */
-    private fun pickPerm(i: Int) {
-        pal.perm = i
-        pal.resetValues()
-        pal.invalidate()
-        requestRender()
-    }
-
-    /** Immagine di partenza per l'anteprima: l'originale, o il suo positivo se l'interruttore è acceso. */
-    private fun basePixels(o: IntArray): IntArray {
-        val b = o.copyOf()
-        val l = lv
-        if (prefs.getBoolean("negative", false) && l != null) applyPositive(b, l)
-        return b
-    }
-
-    private fun rebuildBase() {
-        val o = prevOrig ?: return
-        prevBase = basePixels(o)
-        requestRender()
-    }
-
-    private fun resetAll() {
-        val o = prevOrig ?: return
-        history.clear()
-        prevBase = basePixels(o)
-        pal.perm = 0
-        pal.resetValues()
-        pal.invalidate()
-        requestRender()
-    }
-
     // ---------- salvataggio ----------
     private fun save() {
+        showOnly(null)
         val uri = origUri ?: return
+        val pv = prev ?: return
         val sd = prefs.getString("saveDir", null)
-        if (sd == null) {
+        if (sd == null && Build.VERSION.SDK_INT < 29) {
             msg("Scegli prima la cartella per salva")
-            settings.visibility = View.VISIBLE
+            showOnly(settingsView)
             return
         }
-        val sp = pal.perm
-        val sg = pal.gain.copyOf()
-        val cm = model == "CMY"
-        val neg = prefs.getBoolean("negative", false)
-        val lvs = lv
-        val chOn = che
-        val chPct = cheBlack
-        val cB = colB
-        val cW = colW
-        val dOn = dotsOn
-        val dCols = dotCols
-        val uOn = duoOn
-        val uCols = duoCols
-        val pb = prevBase
-        val steps = ArrayList(history)
+        val fx = makeFx()
         val letters = if (model == "RGB") "RGB" else "CMY"
         val nm = imgName
         val mt = mime
@@ -813,41 +634,50 @@ class MainActivity : AppCompatActivity() {
                 val h = bmp.height
                 val px = IntArray(w * h)
                 bmp.getPixels(px, 0, w, 0, 0, w, h)
-                if (neg && lvs != null) applyPositive(px, lvs)
-                for (s in steps) applyStep(px, s.perm, s.gain, s.cmy)
-                applyStep(px, sp, sg, cm)
-                if (chOn) {
-                    // la soglia si calcola sull'anteprima, così il file salvato è identico a ciò che vedi
-                    val tmp = pb!!.copyOf()
-                    applyStep(tmp, sp, sg, cm)
-                    val tt = thresholdFor(tmp, chPct)
-                    applyThreshold(px, tt, cB, cW)
-                }
-                if (dOn) applyDots(px, w, h, dCols, cB, cW)
-                if (uOn) applyDots(px, w, h, uCols, cB, cW, true)
+                val cheT = if (fx.che) cheThreshold(pv.px, fx) else null
+                runFx(px, w, h, fx, cheT)
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
                 val fmt: Bitmap.CompressFormat
                 val outMime: String
-                when (if (chOn || dOn || uOn) "image/png" else mt) {
-                    "image/jpeg" -> { fmt = Bitmap.CompressFormat.JPEG; outMime = mt }
+                when (if (fx.needsPng) "image/png" else mt) {
+                    "image/jpeg" -> { fmt = Bitmap.CompressFormat.JPEG; outMime = "image/jpeg" }
                     "image/webp" -> {
                         fmt = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
-                        outMime = mt
+                        outMime = "image/webp"
                     }
                     else -> { fmt = Bitmap.CompressFormat.PNG; outMime = "image/png" }
                 }
-                fun label(p: Int) = PERMS[p].map { letters[it] }.joinToString("")
                 val base = nm.substringBeforeLast('.', nm)
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
-                val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
-                val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (dOn) "_retino" else "") + (if (uOn) "_retinobianco" else "") + hist + "_" + label(sp) + ext
+                val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else when (outMime) {
+                    "image/jpeg" -> ".jpg"
+                    "image/webp" -> ".webp"
+                    else -> ".png"
+                }
+                val tags = ArrayList<String>()
+                if (fx.neg) tags.add("pos")
+                if (fx.pal && (fx.perm != 0 || fx.gain.any { it != 50 })) tags.add(PERMS[fx.perm].map { letters[it] }.joinToString(""))
+                if (fx.che) tags.add("che")
+                if (fx.dkb) tags.add("retino")
+                if (fx.dkw) tags.add("retinobianco")
+                val fn = base + "_" + (if (tags.isEmpty()) "copia" else tags.joinToString("_")) + ext
 
-                val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
-                dir.findFile(fn)?.delete()
-                val f = dir.createFile(outMime, fn)!!
-                contentResolver.openOutputStream(f.uri)!!.use { bmp.compress(fmt, 95, it) }
+                if (sd != null) {
+                    val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
+                    dir.findFile(fn)?.delete()
+                    val f = dir.createFile(outMime, fn)!!
+                    contentResolver.openOutputStream(f.uri)!!.use { bmp.compress(fmt, 95, it) }
+                } else {
+                    // senza cartella scelta: DCIM/fotolab, senza bisogno di permessi (Android 10 e successivi)
+                    val cv = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, fn)
+                        put(MediaStore.Images.Media.MIME_TYPE, outMime)
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/fotolab")
+                    }
+                    val out = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)!!
+                    contentResolver.openOutputStream(out)!!.use { bmp.compress(fmt, 95, it) }
+                }
                 msg("Salvato: $fn")
             } catch (e: Throwable) {
                 msg("Salvataggio non riuscito")
