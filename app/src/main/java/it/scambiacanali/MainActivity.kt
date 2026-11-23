@@ -130,6 +130,92 @@ fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
     }
 }
 
+/**
+ * Retino doppio (filtro indipendente): dove domina il nero ci sono pallini neri su sfondo bianco, dove
+ * domina il bianco ci sono pallini bianchi su sfondo nero; a parità di valore vincono i neri.
+ * Le due zone si fondono lungo i bordi. Colori: pallini neri = colore del nero, sfondo bianco = colore del bianco.
+ */
+fun applyDuo(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
+    val cs = w.toFloat() / cols
+    val rows = ceil((h / cs).toDouble()).toInt()
+    val n = cols * rows
+    val sum = LongArray(n)
+    val nt = IntArray(n)
+    val xc = IntArray(w) { min(cols - 1, (it / cs).toInt()) }
+    val yc = IntArray(h) { min(rows - 1, (it / cs).toInt()) }
+    for (y in 0 until h) {
+        val base = y * w
+        val row = yc[y] * cols
+        for (x in 0 until w) {
+            val c0 = px[base + x]
+            val lum = (299 * ((c0 shr 16) and 255) + 587 * ((c0 shr 8) and 255) + 114 * (c0 and 255)) / 1000
+            val k = row + xc[x]
+            nt[k]++
+            sum[k] += lum.toLong()
+        }
+    }
+    val dark = FloatArray(n)
+    val darkMode = BooleanArray(n)
+    for (k in 0 until n) {
+        if (nt[k] == 0) continue
+        dark[k] = 1f - sum[k].toFloat() / (nt[k] * 255f)
+        darkMode[k] = dark[k] >= 0.5f
+    }
+    val bk = (0xFF shl 24) or (black and 0xFFFFFF)
+    val wh = (0xFF shl 24) or (white and 0xFFFFFF)
+    // sfondo: bianco nelle celle dove domina il nero, nero dove domina il bianco
+    for (y in 0 until h) {
+        val row = yc[y] * cols
+        val base = y * w
+        for (x in 0 until w) px[base + x] = if (darkMode[row + xc[x]]) wh else bk
+    }
+    val rt = FloatArray(256) { dotRadius(it / 255.0) }
+    for (j in 0 until rows) {
+        for (i in 0 until cols) {
+            val k = j * cols + i
+            if (nt[k] == 0) continue
+            val m = darkMode[k]
+            val cov = if (m) dark[k] else 1f - dark[k]
+            val r = rt[(cov * 255f + 0.5f).toInt().coerceIn(0, 255)] * cs
+            val dc = if (m) black else white
+            val dr = (dc shr 16) and 255
+            val dg = (dc shr 8) and 255
+            val db = dc and 255
+            val dcol = (0xFF shl 24) or (dc and 0xFFFFFF)
+            val cx = (i + 0.5f) * cs
+            val cy = (j + 0.5f) * cs
+            val x0 = max(0, floor(cx - r - 1f).toInt())
+            val x1 = min(w - 1, ceil(cx + r + 1f).toInt())
+            val y0 = max(0, floor(cy - r - 1f).toInt())
+            val y1 = min(h - 1, ceil(cy + r + 1f).toInt())
+            for (y in y0..y1) {
+                val dy = y + 0.5f - cy
+                val rowk = yc[y] * cols
+                for (x in x0..x1) {
+                    // un pallino agisce solo sulle celle della sua stessa zona
+                    if (darkMode[rowk + xc[x]] != m) continue
+                    val dx = x + 0.5f - cx
+                    val a = (r - sqrt(dx * dx + dy * dy) + 0.5f).coerceIn(0f, 1f)
+                    if (a <= 0f) continue
+                    val idx = y * w + x
+                    if (a >= 1f) {
+                        px[idx] = dcol
+                    } else {
+                        val cur = px[idx]
+                        val rr = (cur shr 16) and 255
+                        val gg = (cur shr 8) and 255
+                        val b2 = cur and 255
+                        val nr = (rr + (dr - rr) * a + 0.5f).toInt()
+                        val ng = (gg + (dg - gg) * a + 0.5f).toInt()
+                        val nbl = (b2 + (db - b2) * a + 0.5f).toInt()
+                        px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nbl
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Colore ARGB da tre quantità di inchiostro C, M, Y (0..100): 0,0,0 = bianco, 100,100,100 = nero. */
 fun inkToColor(ink: IntArray): Int {
     fun ch(v: Int) = (255f * (100 - v) / 100f + 0.5f).toInt()
@@ -294,6 +380,9 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var cheBlack = 50
     private lateinit var cheSwitch: SwitchCompat
     private lateinit var dotsSwitch: SwitchCompat
+    private lateinit var duoSwitch: SwitchCompat
+    @Volatile private var duoOn = false
+    @Volatile private var duoCols = 60
     @Volatile private var dotsOn = false
     @Volatile private var dotCols = 60
     private val inkW = intArrayOf(0, 0, 0)
@@ -335,6 +424,7 @@ class MainActivity : AppCompatActivity() {
         model = prefs.getString("model", "RGB") ?: "RGB"
         cheBlack = prefs.getInt("cheBlack", 50)
         dotCols = prefs.getInt("dotCols", 60)
+        duoCols = prefs.getInt("duoCols", 60)
         for ((key, arr) in listOf("inkW" to inkW, "inkB" to inkB)) {
             val v = prefs.getString(key, null)?.split(",")?.map { it.toIntOrNull() ?: 0 }
             if (v != null && v.size == 3) for (i in 0..2) arr[i] = v[i].coerceIn(0, 100)
@@ -514,7 +604,36 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, on ->
                 dotsOn = on
                 dotsBox.visibility = if (on) View.VISIBLE else View.GONE
-                colorBox.visibility = if (che || dotsOn) View.VISIBLE else View.GONE
+                colorBox.visibility = if (che || dotsOn || duoOn) View.VISIBLE else View.GONE
+                requestRender()
+            }
+        }
+        val duoBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        val duoLabel = TextView(this).apply { setTextColor(Color.WHITE); text = "Colonne: $duoCols" }
+        val duoSeek = SeekBar(this).apply {
+            max = 190
+            progress = duoCols - 10
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                    duoCols = p + 10
+                    duoLabel.text = "Colonne: $duoCols"
+                    if (fromUser) requestRender()
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}
+                override fun onStopTrackingTouch(sb: SeekBar?) {
+                    prefs.edit().putInt("duoCols", duoCols).apply()
+                }
+            })
+        }
+        duoBox.addView(duoLabel)
+        duoBox.addView(duoSeek)
+        duoSwitch = SwitchCompat(this).apply {
+            text = "Retino doppio (nero e bianco)"
+            setTextColor(Color.WHITE)
+            setOnCheckedChangeListener { _, on ->
+                duoOn = on
+                duoBox.visibility = if (on) View.VISIBLE else View.GONE
+                colorBox.visibility = if (che || dotsOn || duoOn) View.VISIBLE else View.GONE
                 requestRender()
             }
         }
@@ -524,7 +643,7 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, on ->
                 che = on
                 cheBox.visibility = if (on) View.VISIBLE else View.GONE
-                colorBox.visibility = if (che || dotsOn) View.VISIBLE else View.GONE
+                colorBox.visibility = if (che || dotsOn || duoOn) View.VISIBLE else View.GONE
                 requestRender()
             }
         }
@@ -532,6 +651,8 @@ class MainActivity : AppCompatActivity() {
         settings.addView(cheBox)
         settings.addView(dotsSwitch)
         settings.addView(dotsBox)
+        settings.addView(duoSwitch)
+        settings.addView(duoBox)
         settings.addView(colorBox)
         settings.addView(Button(this).apply {
             text = "Cartella per apri"
@@ -671,6 +792,7 @@ class MainActivity : AppCompatActivity() {
                     hint.visibility = View.GONE
                     cheSwitch.isChecked = false
                     dotsSwitch.isChecked = false
+                    duoSwitch.isChecked = false
                     requestRender()
                 }
             } catch (e: Throwable) {
@@ -691,6 +813,7 @@ class MainActivity : AppCompatActivity() {
                         applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
                         if (che) applyThreshold(out, thresholdFor(out, cheBlack), colB, colW)
                         if (dotsOn) applyDots(out, pw, ph, dotCols, colB, colW)
+                        if (duoOn) applyDuo(out, pw, ph, duoCols, colB, colW)
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -755,6 +878,8 @@ class MainActivity : AppCompatActivity() {
         val cW = colW
         val dOn = dotsOn
         val dCols = dotCols
+        val uOn = duoOn
+        val uCols = duoCols
         val pb = prevBase
         val steps = ArrayList(history)
         val letters = if (model == "RGB") "RGB" else "CMY"
@@ -780,11 +905,12 @@ class MainActivity : AppCompatActivity() {
                     applyThreshold(px, tt, cB, cW)
                 }
                 if (dOn) applyDots(px, w, h, dCols, cB, cW)
+                if (uOn) applyDuo(px, w, h, uCols, cB, cW)
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
                 val fmt: Bitmap.CompressFormat
                 val outMime: String
-                when (if (chOn || dOn) "image/png" else mt) {
+                when (if (chOn || dOn || uOn) "image/png" else mt) {
                     "image/jpeg" -> { fmt = Bitmap.CompressFormat.JPEG; outMime = mt }
                     "image/webp" -> {
                         fmt = if (Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSY else Bitmap.CompressFormat.WEBP
@@ -797,7 +923,7 @@ class MainActivity : AppCompatActivity() {
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
                 val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
                 val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (dOn) "_retino" else "") + hist + "_" + label(sp) + ext
+                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (dOn) "_retino" else "") + (if (uOn) "_doppio" else "") + hist + "_" + label(sp) + ext
 
                 val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
                 dir.findFile(fn)?.delete()
