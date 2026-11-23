@@ -53,6 +53,8 @@ private fun cl(x: Float): Int = if (x < 0f) 0 else if (x > 255f) 255 else (x + 0
  * precedenti. Griglia di celle quadrate (cols colonne), un pallino al centro di ogni cella: più la
  * cella è scura, più il pallino è grande (cella nera = pallino che riempie la cella e si fonde con
  * i vicini, cella bianca = nessun pallino). Pallini nel colore del nero, sfondo nel colore del bianco.
+ * Con inverse = true è il contrario: più la cella è chiara, più il pallino è grande; pallini nel
+ * colore del bianco su sfondo nel colore del nero.
  */
 /** Raggio (in celle) del pallino che, nella griglia, copre la frazione "dark" della cella; i pallini si fondono oltre 0,5. */
 private fun dotRadius(dark: Double): Float {
@@ -69,7 +71,7 @@ private fun dotRadius(dark: Double): Float {
     return hi.toFloat()
 }
 
-fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
+fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int, inverse: Boolean = false) {
     val cs = w.toFloat() / cols
     val rows = ceil((h / cs).toDouble()).toInt()
     val sum = LongArray(cols * rows)
@@ -86,17 +88,20 @@ fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
             sum[k] += lum.toLong()
         }
     }
-    java.util.Arrays.fill(px, (0xFF shl 24) or (white and 0xFFFFFF))
-    val bk = (0xFF shl 24) or (black and 0xFFFFFF)
-    val br = (black shr 16) and 255
-    val bg = (black shr 8) and 255
-    val bb = black and 255
+    val dotCol = if (inverse) white else black
+    val bgCol = if (inverse) black else white
+    java.util.Arrays.fill(px, (0xFF shl 24) or (bgCol and 0xFFFFFF))
+    val bk = (0xFF shl 24) or (dotCol and 0xFFFFFF)
+    val br = (dotCol shr 16) and 255
+    val bg = (dotCol shr 8) and 255
+    val bb = dotCol and 255
     val rt = FloatArray(256) { dotRadius(it / 255.0) }
     for (j in 0 until rows) {
         for (i in 0 until cols) {
             val k = j * cols + i
             if (nt[k] == 0) continue
-            val dark = 1f - sum[k].toFloat() / (nt[k] * 255f)
+            val mean = sum[k].toFloat() / (nt[k] * 255f)
+            val dark = if (inverse) mean else 1f - mean
             if (dark < 0.02f) continue
             val r = rt[(dark * 255f + 0.5f).toInt().coerceIn(0, 255)] * cs
             val cx = (i + 0.5f) * cs
@@ -122,92 +127,6 @@ fun applyDots(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
                         val nr = (rr + (br - rr) * a + 0.5f).toInt()
                         val ng = (gg + (bg - gg) * a + 0.5f).toInt()
                         val nbl = (b2 + (bb - b2) * a + 0.5f).toInt()
-                        px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nbl
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
- * Retino doppio (filtro indipendente): dove domina il nero ci sono pallini neri su sfondo bianco, dove
- * domina il bianco ci sono pallini bianchi su sfondo nero; a parità di valore vincono i neri.
- * Le due zone si fondono lungo i bordi. Colori: pallini neri = colore del nero, sfondo bianco = colore del bianco.
- */
-fun applyDuo(px: IntArray, w: Int, h: Int, cols: Int, black: Int, white: Int) {
-    val cs = w.toFloat() / cols
-    val rows = ceil((h / cs).toDouble()).toInt()
-    val n = cols * rows
-    val sum = LongArray(n)
-    val nt = IntArray(n)
-    val xc = IntArray(w) { min(cols - 1, (it / cs).toInt()) }
-    val yc = IntArray(h) { min(rows - 1, (it / cs).toInt()) }
-    for (y in 0 until h) {
-        val base = y * w
-        val row = yc[y] * cols
-        for (x in 0 until w) {
-            val c0 = px[base + x]
-            val lum = (299 * ((c0 shr 16) and 255) + 587 * ((c0 shr 8) and 255) + 114 * (c0 and 255)) / 1000
-            val k = row + xc[x]
-            nt[k]++
-            sum[k] += lum.toLong()
-        }
-    }
-    val dark = FloatArray(n)
-    val darkMode = BooleanArray(n)
-    for (k in 0 until n) {
-        if (nt[k] == 0) continue
-        dark[k] = 1f - sum[k].toFloat() / (nt[k] * 255f)
-        darkMode[k] = dark[k] >= 0.5f
-    }
-    val bk = (0xFF shl 24) or (black and 0xFFFFFF)
-    val wh = (0xFF shl 24) or (white and 0xFFFFFF)
-    // sfondo: bianco nelle celle dove domina il nero, nero dove domina il bianco
-    for (y in 0 until h) {
-        val row = yc[y] * cols
-        val base = y * w
-        for (x in 0 until w) px[base + x] = if (darkMode[row + xc[x]]) wh else bk
-    }
-    val rt = FloatArray(256) { dotRadius(it / 255.0) }
-    for (j in 0 until rows) {
-        for (i in 0 until cols) {
-            val k = j * cols + i
-            if (nt[k] == 0) continue
-            val m = darkMode[k]
-            val cov = if (m) dark[k] else 1f - dark[k]
-            val r = rt[(cov * 255f + 0.5f).toInt().coerceIn(0, 255)] * cs
-            val dc = if (m) black else white
-            val dr = (dc shr 16) and 255
-            val dg = (dc shr 8) and 255
-            val db = dc and 255
-            val dcol = (0xFF shl 24) or (dc and 0xFFFFFF)
-            val cx = (i + 0.5f) * cs
-            val cy = (j + 0.5f) * cs
-            val x0 = max(0, floor(cx - r - 1f).toInt())
-            val x1 = min(w - 1, ceil(cx + r + 1f).toInt())
-            val y0 = max(0, floor(cy - r - 1f).toInt())
-            val y1 = min(h - 1, ceil(cy + r + 1f).toInt())
-            for (y in y0..y1) {
-                val dy = y + 0.5f - cy
-                val rowk = yc[y] * cols
-                for (x in x0..x1) {
-                    // un pallino agisce solo sulle celle della sua stessa zona
-                    if (darkMode[rowk + xc[x]] != m) continue
-                    val dx = x + 0.5f - cx
-                    val a = (r - sqrt(dx * dx + dy * dy) + 0.5f).coerceIn(0f, 1f)
-                    if (a <= 0f) continue
-                    val idx = y * w + x
-                    if (a >= 1f) {
-                        px[idx] = dcol
-                    } else {
-                        val cur = px[idx]
-                        val rr = (cur shr 16) and 255
-                        val gg = (cur shr 8) and 255
-                        val b2 = cur and 255
-                        val nr = (rr + (dr - rr) * a + 0.5f).toInt()
-                        val ng = (gg + (dg - gg) * a + 0.5f).toInt()
-                        val nbl = (b2 + (db - b2) * a + 0.5f).toInt()
                         px[idx] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nbl
                     }
                 }
@@ -628,7 +547,7 @@ class MainActivity : AppCompatActivity() {
         duoBox.addView(duoLabel)
         duoBox.addView(duoSeek)
         duoSwitch = SwitchCompat(this).apply {
-            text = "Retino doppio (nero e bianco)"
+            text = "Retino a pallini bianchi"
             setTextColor(Color.WHITE)
             setOnCheckedChangeListener { _, on ->
                 duoOn = on
@@ -813,7 +732,7 @@ class MainActivity : AppCompatActivity() {
                         applyStep(out, pal.perm, pal.gain.copyOf(), model == "CMY")
                         if (che) applyThreshold(out, thresholdFor(out, cheBlack), colB, colW)
                         if (dotsOn) applyDots(out, pw, ph, dotCols, colB, colW)
-                        if (duoOn) applyDuo(out, pw, ph, duoCols, colB, colW)
+                        if (duoOn) applyDots(out, pw, ph, duoCols, colB, colW, true)
                         val bmp = Bitmap.createBitmap(out, pw, ph, Bitmap.Config.ARGB_8888)
                         runOnUiThread { img.setImageBitmap(bmp) }
                     } catch (e: Exception) {
@@ -905,7 +824,7 @@ class MainActivity : AppCompatActivity() {
                     applyThreshold(px, tt, cB, cW)
                 }
                 if (dOn) applyDots(px, w, h, dCols, cB, cW)
-                if (uOn) applyDuo(px, w, h, uCols, cB, cW)
+                if (uOn) applyDots(px, w, h, uCols, cB, cW, true)
                 bmp.setPixels(px, 0, w, 0, 0, w, h)
 
                 val fmt: Bitmap.CompressFormat
@@ -923,7 +842,7 @@ class MainActivity : AppCompatActivity() {
                 val origExt = if (nm.contains('.')) "." + nm.substringAfterLast('.') else ""
                 val ext = if (outMime == mt && origExt.isNotEmpty()) origExt else ".png"
                 val hist = steps.filter { it.perm != 0 }.joinToString("") { "_" + label(it.perm) }
-                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (dOn) "_retino" else "") + (if (uOn) "_doppio" else "") + hist + "_" + label(sp) + ext
+                val fn = base + (if (neg) "_pos" else "") + (if (chOn) "_che" else "") + (if (dOn) "_retino" else "") + (if (uOn) "_retinobianco" else "") + hist + "_" + label(sp) + ext
 
                 val dir = DocumentFile.fromTreeUri(this, Uri.parse(sd))!!
                 dir.findFile(fn)?.delete()
