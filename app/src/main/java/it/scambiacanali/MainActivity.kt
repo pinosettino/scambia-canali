@@ -21,6 +21,7 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -61,7 +62,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var hint: TextView
     private lateinit var settingsView: View
 
-    private val overlays = ArrayList<View>()
+    private val details = ArrayList<View>()
+    private lateinit var stackView: View
     private val refreshers = ArrayList<() -> Unit>()
     private val menuSync = ArrayList<() -> Unit>()
     private var syncing = false
@@ -101,11 +103,6 @@ class MainActivity : AppCompatActivity() {
         window.statusBarColor = Color.BLACK
         window.navigationBarColor = Color.BLACK
         prefs = getSharedPreferences("cfg", MODE_PRIVATE)
-        model = prefs.getString("model", "RGB") ?: "RGB"
-        negOn = prefs.getBoolean("negative", false)
-        loadState("che", che)
-        loadState("dkb", dkb)
-        loadState("dkw", dkw)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -136,10 +133,38 @@ class MainActivity : AppCompatActivity() {
         val panelDkw = buildPanel("dkw", "Retino a pallini bianco", dkw, withBlack = false, withCols = true)
         val menuP = buildMenu(panelChe, panelDkb, panelDkw)
 
-        addOverlay(stage, pal, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END, 0)
-        addOverlay(stage, settingsP, (screenW * 0.62f).toInt(), Gravity.TOP or Gravity.START, 6)
-        addOverlay(stage, menuP, (screenW * 0.62f).toInt(), Gravity.TOP or Gravity.END, 6)
-        for (p in listOf(panelChe, panelDkb, panelDkw)) addOverlay(stage, p, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.TOP, 8)
+        // le impostazioni (ingranaggio): pannello a sinistra
+        settingsP.isClickable = true
+        val slp = FrameLayout.LayoutParams((screenW * 0.62f).toInt(), FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START)
+        slp.setMargins(dp(6), dp(6), dp(6), dp(6))
+        stage.addView(settingsP, slp)
+
+        // il menu (≡): il menu resta aperto, e sotto di lui si apre il pannello del filtro scelto
+        val stack = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setOnClickListener { showOnly(null) }
+        }
+        menuP.isClickable = true
+        val mlp = LinearLayout.LayoutParams((screenW * 0.62f).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT)
+        mlp.gravity = Gravity.END
+        mlp.setMargins(dp(6), dp(6), dp(6), dp(6))
+        stack.addView(menuP, mlp)
+        val plp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        plp.gravity = Gravity.END
+        plp.setMargins(0, 0, dp(6), dp(6))
+        stack.addView(pal, plp)
+        for (p in listOf(panelChe, panelDkb, panelDkw)) {
+            p.isClickable = true
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.setMargins(dp(8), 0, dp(8), dp(8))
+            stack.addView(p, lp)
+        }
+        details.addAll(listOf(pal, panelChe, panelDkb, panelDkw))
+        val scroll = ScrollView(this)
+        scroll.visibility = View.GONE
+        scroll.addView(stack)
+        stackView = scroll
+        stage.addView(scroll, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP))
 
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -151,7 +176,7 @@ class MainActivity : AppCompatActivity() {
         bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         bar.addView(tv("apri") { openClicked() })
         bar.addView(tv("salva") { save() })
-        bar.addView(tv("menu \u2630") { toggle(menuP) })
+        bar.addView(tv("menu \u2630") { toggle(stackView) })
 
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -169,21 +194,20 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { f() }
     }
 
-    private fun addOverlay(stage: FrameLayout, v: View, w: Int, gravity: Int, margin: Int) {
-        val lp = FrameLayout.LayoutParams(w, FrameLayout.LayoutParams.WRAP_CONTENT, gravity)
-        lp.setMargins(dp(margin), dp(margin), dp(margin), dp(margin))
-        stage.addView(v, lp)
-        overlays.add(v)
-    }
-
-    /** Mostra solo il pannello indicato (o nessuno). */
+    /** Pannelli principali: o le impostazioni (ingranaggio) o il menu con i suoi pannelli, mai insieme. */
     private fun showOnly(v: View?) {
-        for (o in overlays) o.visibility = View.GONE
-        v?.visibility = View.VISIBLE
+        settingsView.visibility = if (v === settingsView) View.VISIBLE else View.GONE
+        stackView.visibility = if (v === stackView) View.VISIBLE else View.GONE
     }
 
     private fun toggle(v: View) {
         if (v.visibility == View.VISIBLE) showOnly(null) else showOnly(v)
+    }
+
+    /** Dentro il menu: mostra un solo pannello di filtro (la palette o un altro), o nessuno. */
+    private fun showDetail(v: View?) {
+        for (d in details) d.visibility = View.GONE
+        v?.visibility = View.VISIBLE
     }
 
     private fun SeekBar.cyan() {
@@ -281,7 +305,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun setModel(m: String) {
         model = m
-        prefs.edit().putString("model", m).apply()
         pal.resetValues()
         applyModel()
         refreshers.forEach { it() }
@@ -319,7 +342,7 @@ class MainActivity : AppCompatActivity() {
             set(on)
             requestRender()
             if (panel != null) {
-                if (on) showOnly(panel) else panel.visibility = View.GONE
+                if (on) showDetail(panel) else panel.visibility = View.GONE
             }
         }
         val t = TextView(this).apply {
@@ -328,7 +351,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 17f
             setPadding(dp(10), dp(4), 0, dp(4))
         }
-        t.setOnClickListener { if (panel != null) toggle(panel) }
+        t.setOnClickListener { if (panel != null) { if (panel.visibility == View.VISIBLE) panel.visibility = View.GONE else showDetail(panel) } }
         row.addView(sw)
         row.addView(t)
         box.addView(row)
@@ -345,7 +368,6 @@ class MainActivity : AppCompatActivity() {
         menuRow(box, "PALETTE FOTO", { palOn }, { palOn = it }, pal)
         menuRow(box, "NEGATIVO -> POSITIVO", { negOn }, {
             negOn = it
-            prefs.edit().putBoolean("negative", it).apply()
         }, null)
         menuRow(box, "EFFETTO CHE GUEVARA", { che.on }, { che.on = it }, panelChe)
         menuRow(box, "RETINO A PALLINI NERI", { dkb.on }, { dkb.on = it }, panelDkb)
@@ -356,7 +378,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 17f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(dp(4), dp(16), 0, dp(4))
-            setOnClickListener { resetAll(); showOnly(null) }
+            setOnClickListener { resetAll() }
         }
         box.addView(az)
         return box
@@ -369,24 +391,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ---------- pannelli dei filtri ----------
-    private fun saveState(key: String, f: FState) {
-        prefs.edit()
-            .putInt("$key.cols", f.cols)
-            .putInt("$key.black", f.black)
-            .putString("$key.w", f.w.joinToString(","))
-            .putString("$key.b", f.b.joinToString(","))
-            .apply()
-    }
-
-    private fun loadState(key: String, f: FState) {
-        f.cols = prefs.getInt("$key.cols", f.cols).coerceIn(10, 200)
-        f.black = prefs.getInt("$key.black", f.black).coerceIn(0, 100)
-        for ((suffix, arr) in listOf("w" to f.w, "b" to f.b)) {
-            val v = prefs.getString("$key.$suffix", null)?.split(",")?.map { it.toIntOrNull() ?: 0 }
-            if (v != null && v.size == 3) for (i in 0..2) arr[i] = v[i].coerceIn(0, 100)
-        }
-    }
-
     private fun buildPanel(key: String, title: String, f: FState, withBlack: Boolean, withCols: Boolean): LinearLayout {
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -404,7 +408,7 @@ class MainActivity : AppCompatActivity() {
                 f.black = p
                 l.text = "Nero: $p"
                 if (user) requestRender()
-            }, { saveState(key, f) }))
+            }, { }))
         }
         if (withCols) {
             val l = lab("Colonne: ${f.cols}")
@@ -413,7 +417,7 @@ class MainActivity : AppCompatActivity() {
                 f.cols = p + 10
                 l.text = "Colonne: ${f.cols}"
                 if (user) requestRender()
-            }, { saveState(key, f) }))
+            }, { }))
         }
 
         // i due colori del filtro: si sceglie il cerchio, poi si regolano i tre cursori
@@ -465,7 +469,7 @@ class MainActivity : AppCompatActivity() {
                     refreshDots()
                     requestRender()
                 }
-            }, { saveState(key, f) })
+            }, { })
             labels.add(l)
             bars.add(s)
             r.addView(l)
@@ -559,6 +563,7 @@ class MainActivity : AppCompatActivity() {
         che.on = false
         dkb.on = false
         dkw.on = false
+        showDetail(null)
         syncMenu()
     }
 
