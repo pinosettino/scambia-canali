@@ -363,7 +363,6 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(14), dp(12), dp(14), dp(14))
             background = GradientDrawable().apply { setColor(0xB3000000.toInt()) }
-            visibility = View.GONE
         }
         menuRow(box, "PALETTE FOTO", { palOn }, { palOn = it }, pal)
         menuRow(box, "NEGATIVO -> POSITIVO", { negOn }, {
