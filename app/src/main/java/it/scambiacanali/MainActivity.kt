@@ -64,6 +64,8 @@ class MainActivity : AppCompatActivity() {
 
     private val details = ArrayList<View>()
     private lateinit var stackView: View
+    private lateinit var menuView: View
+    private var lastDetail: View? = null
     private val refreshers = ArrayList<() -> Unit>()
     private val menuSync = ArrayList<() -> Unit>()
     private var syncing = false
@@ -74,6 +76,8 @@ class MainActivity : AppCompatActivity() {
     private val che = FState(black = 50)
     private val dkb = FState()
     private val dkw = FState()
+    /** Filtri mutuamente esclusivi (retini): accendendone uno si spengono gli altri. Qui si aggiungeranno i prossimi. */
+    private val retini = listOf(dkb, dkw)
 
     private var origUri: Uri? = null
     private var imgName = "immagine.png"
@@ -111,7 +115,7 @@ class MainActivity : AppCompatActivity() {
         val stage = FrameLayout(this)
 
         img = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        img.setOnClickListener { showOnly(null) }
+        img.setOnClickListener { imageTapped() }
         stage.addView(img, FrameLayout.LayoutParams(-1, -1))
         hint = TextView(this).apply {
             text = "Tocca \u00abapri\u00bb per scegliere un'immagine."
@@ -142,8 +146,9 @@ class MainActivity : AppCompatActivity() {
         // il menu (≡): il menu resta aperto, e sotto di lui si apre il pannello del filtro scelto
         val stack = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setOnClickListener { showOnly(null) }
+            setOnClickListener { imageTapped() }
         }
+        menuView = menuP
         menuP.isClickable = true
         val mlp = LinearLayout.LayoutParams((screenW * 0.62f).toInt(), LinearLayout.LayoutParams.WRAP_CONTENT)
         mlp.gravity = Gravity.END
@@ -159,7 +164,7 @@ class MainActivity : AppCompatActivity() {
             lp.setMargins(dp(8), 0, dp(8), dp(8))
             stack.addView(p, lp)
         }
-        details.addAll(listOf(pal, panelChe, panelDkb, panelDkw))
+        details.addAll(listOf(menuP, pal, panelChe, panelDkb, panelDkw))
         val scroll = ScrollView(this)
         scroll.visibility = View.GONE
         scroll.addView(stack)
@@ -172,11 +177,11 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             setPadding(dp(6), 0, dp(6), 0)
         }
-        bar.addView(tv("\u2699") { toggle(settingsP) }.apply { textSize = 28f; setTextColor(0xFFCCCCCC.toInt()) })
+        bar.addView(tv("\u2699") { lastDetail = null; toggle(settingsP) }.apply { textSize = 28f; setTextColor(0xFFCCCCCC.toInt()) })
         bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
         bar.addView(tv("apri") { openClicked() })
         bar.addView(tv("salva") { save() })
-        bar.addView(tv("menu \u2630") { toggle(stackView) })
+        bar.addView(tv("menu \u2630") { menuButton() })
 
         root.addView(bar, LinearLayout.LayoutParams(-1, -2))
         root.addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
@@ -204,10 +209,46 @@ class MainActivity : AppCompatActivity() {
         if (v.visibility == View.VISIBLE) showOnly(null) else showOnly(v)
     }
 
-    /** Dentro il menu: mostra un solo pannello di filtro (la palette o un altro), o nessuno. */
+    /** Dentro il contenitore: mostra un solo riquadro (il menu, la palette o il pannello di un filtro), o nessuno. */
     private fun showDetail(v: View?) {
         for (d in details) d.visibility = View.GONE
         v?.visibility = View.VISIBLE
+    }
+
+    /** Tasto "menu": mostra il menu e nasconde l'eventuale riquadro di un filtro; se il menu è già aperto lo chiude. */
+    private fun menuButton() {
+        if (stackView.visibility == View.VISIBLE && menuView.visibility == View.VISIBLE) {
+            showOnly(null)
+            return
+        }
+        lastDetail = null
+        showOnly(stackView)
+        showDetail(menuView)
+    }
+
+    /**
+     * Tocco sull'immagine: chiude le impostazioni o il menu; se è aperto il riquadro di un filtro lo nasconde
+     * (così si vede tutta l'immagine) e un nuovo tocco lo fa riapparire com'era.
+     */
+    private fun imageTapped() {
+        if (settingsView.visibility == View.VISIBLE) {
+            showOnly(null)
+            return
+        }
+        if (stackView.visibility == View.VISIBLE) {
+            val d = details.firstOrNull { it.visibility == View.VISIBLE }
+            lastDetail = if (d != null && d !== menuView) d else null
+            showOnly(null)
+            return
+        }
+        if (lastDetail != null) {
+            lastDetail = null
+            showOnly(stackView)
+        }
+    }
+
+    private fun exclusiveOn(f: FState) {
+        if (f.on) for (o in retini) if (o !== f) o.on = false
     }
 
     private fun SeekBar.cyan() {
@@ -341,9 +382,8 @@ class MainActivity : AppCompatActivity() {
             if (syncing) return@setOnCheckedChangeListener
             set(on)
             requestRender()
-            if (panel != null) {
-                if (on) showDetail(panel) else panel.visibility = View.GONE
-            }
+            syncMenu()
+            if (panel != null && on) showDetail(panel)
         }
         val t = TextView(this).apply {
             text = label
@@ -351,7 +391,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 17f
             setPadding(dp(10), dp(4), 0, dp(4))
         }
-        t.setOnClickListener { if (panel != null) { if (panel.visibility == View.VISIBLE) panel.visibility = View.GONE else showDetail(panel) } }
+        t.setOnClickListener { if (panel != null) showDetail(panel) }
         row.addView(sw)
         row.addView(t)
         box.addView(row)
@@ -369,8 +409,8 @@ class MainActivity : AppCompatActivity() {
             negOn = it
         }, null)
         menuRow(box, "EFFETTO CHE GUEVARA", { che.on }, { che.on = it }, panelChe)
-        menuRow(box, "RETINO A PALLINI NERI", { dkb.on }, { dkb.on = it }, panelDkb)
-        menuRow(box, "RETINO A PALLINI BIANCHI", { dkw.on }, { dkw.on = it }, panelDkw)
+        menuRow(box, "RETINO A PALLINI NERI", { dkb.on }, { dkb.on = it; exclusiveOn(dkb) }, panelDkb)
+        menuRow(box, "RETINO A PALLINI BIANCHI", { dkw.on }, { dkw.on = it; exclusiveOn(dkw) }, panelDkw)
         val az = TextView(this).apply {
             text = "AZZERA"
             setTextColor(Color.WHITE)
@@ -562,7 +602,7 @@ class MainActivity : AppCompatActivity() {
         che.on = false
         dkb.on = false
         dkw.on = false
-        showDetail(null)
+        lastDetail = null
         syncMenu()
     }
 
